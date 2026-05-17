@@ -12,6 +12,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@google/genai": "^1.0.0",
     "@nuxt/ui": "^3.0.0",
     "@nuxtjs/supabase": "^1.4.6",
     "@supabase/supabase-js": "^2.45.0",

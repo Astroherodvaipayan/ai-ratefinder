@@ -11,6 +11,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { extractPriceRows, extractBoqLines } from '../../../utils/extract'
+import { extractPriceRowsLLM } from '../../../utils/gemini'
 
 export default defineEventHandler(async (event) => {
   const user = await requireUser(event)
@@ -70,7 +71,28 @@ export default defineEventHandler(async (event) => {
     if (!job.vendor_id) {
       throw createError({ statusCode: 400, statusMessage: 'vendor_id required for price-list ingest' })
     }
-    const rows = extractPriceRows(markdown)
+
+    // Gemini-cleaned rows are the source of truth; fall back to the
+    // regex extractor if the LLM returns nothing (e.g. quota error).
+    let rows = (await extractPriceRowsLLM(markdown)).map(r => ({
+      raw_name: r.raw_name,
+      sku: r.sku,
+      unit: r.unit,
+      price: r.price,
+      currency: r.currency,
+      raw_row: { moq: r.moq, source_page: r.source_page }
+    }))
+    if (rows.length === 0) {
+      rows = extractPriceRows(markdown).map(r => ({
+        raw_name: r.raw_name,
+        sku: r.sku,
+        unit: r.unit,
+        price: r.price,
+        currency: r.currency,
+        raw_row: r.raw_row ?? {}
+      }))
+    }
+
     if (rows.length > 0) {
       const inserts = rows.map(r => ({
         owner_id: user.id,

@@ -1,23 +1,29 @@
 # AI Ratefinder — Plan, Flow & Mockups
 
 > **One-line pitch**
-> A private library of vendor price docs you can chat with. Ask "what's the
-> price of Polycab 2.5mm wire?" and get the answer, the MOQ, and the source
-> page — then drop items into a quotation and download it.
+> A private library of vendor price docs you can chat with. Datalab **Chandra 2**
+> reads the docs, **Google Gemini** answers your questions from them. Ask
+> "what's the price of Polycab 2.5mm wire?" and get the answer, the MOQ, and
+> the source page — then drop items into a quotation and download it.
 
 ---
 
-## 1. What we're building (in 5 bullets)
+## 1. What we're building (in 6 bullets)
 
 1. A **Library page** — drop PDFs, images and Excels of vendor price lists.
    Each one is OCR'd by **Datalab Chandra 2** the moment it's uploaded.
-2. A **chat interface** (Claude-style) — ask plain-English questions; the
-   server searches every parsed doc and answers with **structured price cards**
+2. **Gemini cleans the OCR output** — Chandra's markdown is handed to Gemini
+   with a strict JSON schema, so we get reliable rows (`product, sku, unit,
+   price, moq, currency`) even when tables are messy or footnotes carry the
+   unit ("prices in ₹/100m").
+3. A **chat interface** (Claude-style) — ask plain-English questions; the
+   server retrieves candidate rows, **Gemini reads them + the surrounding
+   markdown** and writes a precise answer with **structured price cards**
    (product, price, MOQ, unit, vendor, source doc + page).
-3. Every card has an **"Add to quotation"** button.
-4. The **Quotation builder** lets you set qty / discount / GST / freight and
+4. Every card has an **"Add to quotation"** button.
+5. The **Quotation builder** lets you set qty / discount / GST / freight and
    download the finished quote as **PDF or Excel**.
-5. Everything is per-user and private (Supabase Auth + RLS).
+6. Everything is per-user and private (Supabase Auth + RLS).
 
 No live ERP, no vendor APIs, no inventory — just docs in, prices out, quote
 down.
@@ -41,8 +47,16 @@ down.
         │                         ▼                        │
         │           ┌──────────────────────────────┐       │
         │           │  Chandra 2 OCR  (background) │       │
-        │           │  markdown → parsed rows      │       │
-        │           │  rows → searchable index     │       │
+        │           │  → markdown of every table   │       │
+        │           └──────────────┬───────────────┘       │
+        │                          │                       │
+        │                          ▼                       │
+        │           ┌──────────────────────────────┐       │
+        │           │  Gemini 2.5 Flash            │       │
+        │           │  + JSON schema               │       │
+        │           │  → clean PriceRow records    │       │
+        │           │  → indexed (tsvector +       │       │
+        │           │    pg_trgm) into doc_items   │       │
         │           └──────────────────────────────┘       │
         │                                                  │
         │                  ┌──────────────┐                │
@@ -53,12 +67,22 @@ down.
         │                         │                        │
         │                         ▼                        │
         │           ┌──────────────────────────────┐       │
-        │           │  search across doc_items     │       │
+        │           │  retrieve top-N rows         │       │
         │           │  (tsvector + pg_trgm)        │       │
+        │           │  + surrounding markdown      │       │
         │           └──────────────┬───────────────┘       │
         │                          │                       │
         │                          ▼                       │
         │           ┌──────────────────────────────┐       │
+        │           │  Gemini 2.5 Flash            │       │
+        │           │  + JSON schema:              │       │
+        │           │  { answer_text, items[…] }   │       │
+        │           │  with required citations     │       │
+        │           └──────────────┬───────────────┘       │
+        │                          │                       │
+        │                          ▼                       │
+        │           ┌──────────────────────────────┐       │
+        │           │  conversational reply +      │       │
         │           │  structured price card(s)    │       │
         │           │  [ + Add to quotation ]      │       │
         │           └──────────────┬───────────────┘       │
@@ -167,13 +191,32 @@ PDF/Excel preview side-by-side. Edit a row, retag the vendor, delete the doc.
 **How a chat message becomes an answer**
 1. The message text is the search query.
 2. Server runs full-text (`tsvector`) + trigram (`pg_trgm`) over every parsed
-   row (`doc_items.raw_name + sku + raw_row`), scoped to the signed-in user.
-3. Top hits are rendered as price cards with vendor + source-page citations.
-4. **"View source"** opens the original PDF zoomed to the right page.
-5. **"+ Add to quotation"** drops the item into the current quotation draft.
-
-(Future: a small LLM can read the top hits and write a conversational summary
-like "Havells is cheaper by ₹130 for the same gauge." MVP ships without it.)
+   row (`doc_items.raw_name + sku + raw_row`), scoped to the signed-in user,
+   and pulls the **top 15** candidate rows along with the **±10 lines of
+   surrounding markdown** from each row's source page.
+3. Those candidates + the conversation so far go to **Gemini 2.5 Flash** with
+   a strict response schema:
+   ```ts
+   {
+     answer_text: string,            // e.g. "Havells is ₹130 cheaper per coil…"
+     items: Array<{
+       doc_item_id: string,          // must be one of the supplied candidates
+       product_name: string,
+       sku?: string,
+       unit?: string,
+       price?: number,
+       moq?: string,
+       vendor: string,
+       source_page?: number,
+       confidence: number            // 0..1
+     }>
+   }
+   ```
+4. The conversational `answer_text` renders above; each `items[i]` becomes a
+   price card with **"+ Add to quotation"** and **"View source"**.
+5. **"View source"** opens the original PDF zoomed to the right page.
+6. Gemini is constrained to cite only `doc_item_id`s we passed in, so it
+   can't hallucinate a vendor or invent a price.
 
 ### 3.3 Quotation
 
@@ -228,14 +271,23 @@ like "Havells is cheaper by ₹130 for the same gauge." MVP ships without it.)
                           │    /api/chat         │
                           │    /api/search       │
                           │    /api/quotations   │
-                          └──┬───────────────┬───┘
-                             │               │
-                  ┌──────────▼──┐         ┌──▼───────────────────┐
-                  │  Supabase   │         │  Datalab Chandra 2   │
-                  │  Postgres   │         │   /api/v1/convert    │
-                  │  Auth       │         │   submit + poll      │
-                  │  Storage    │         └──────────────────────┘
-                  └─────────────┘
+                          └──┬─────────┬─────────┬┘
+                             │         │         │
+                  ┌──────────▼──┐  ┌───▼──────┐  └─────────────────────┐
+                  │  Supabase   │  │ Chandra 2│                        │
+                  │  Postgres   │  │  OCR     │                        │
+                  │  Auth       │  │ /v1/     │                        │
+                  │  Storage    │  │ convert  │                        │
+                  └─────────────┘  └──────────┘                        │
+                                                                       │
+                                                ┌──────────────────────▼───┐
+                                                │   Google Gemini 2.5      │
+                                                │   • Flash (default)      │
+                                                │   • Pro (hard queries)   │
+                                                │   responseMimeType:      │
+                                                │     application/json     │
+                                                │   responseSchema: …      │
+                                                └──────────────────────────┘
 ```
 
 **Data model (simpler than before)**
@@ -274,9 +326,10 @@ search returns — no separate master catalogue to maintain.
 | Week | Days  | Milestone                                          | Demo                                            |
 | ---- | ----- | -------------------------------------------------- | ----------------------------------------------- |
 | 1    | 1–7   | App shell, auth, Library page, upload to storage   | Sign in, drop a PDF, see it listed              |
-| 2    | 5–14  | Chandra 2 ingest + table parsing into `doc_items`  | Drop a price list → 300 rows indexed in 30 s    |
-| 2    | 10–14 | Library detail drawer (parsed table + source view) | Click a doc, scroll the extracted rows          |
-| 3    | 12–20 | Chat UI + search backend + price-card renderer     | Ask "polycab 2.5mm" → cards with vendor + page  |
+| 2    | 5–12  | Chandra 2 ingest + raw markdown stored             | Drop a price list → markdown viewable           |
+| 2    | 8–14  | **Gemini extractor**: markdown → clean rows        | 300 rows indexed in 30 s, no regex misses       |
+| 2–3  | 10–16 | Library detail drawer (parsed table + source view) | Click a doc, scroll the extracted rows          |
+| 3    | 14–22 | Chat UI + retrieval + **Gemini answer endpoint**   | Ask "polycab 2.5mm" → conversational reply + cards |
 | 3–4  | 18–24 | Quotation draft, add-from-chat, edit qty           | Click + on a card → appears in quotation        |
 | 4    | 22–28 | Discount / GST / freight + live totals             | Numbers update as you type                      |
 | 4–5  | 26–32 | PDF & Excel export (`pdfmake` + `exceljs`)         | Download a branded PDF                          |
@@ -297,8 +350,10 @@ reviews the quotation before it goes out).
 
 1. **Supabase project URL + service-role key** (or invite me to create one).
 2. **Datalab API key** (https://www.datalab.to).
-3. **2–3 sample vendor price docs** + **1 sample BOQ** as test fixtures.
-4. **Logo + brand colour** for the PDF header (or default neutral).
+3. **Google AI Studio API key** for Gemini 2.5 Flash / Pro
+   (https://aistudio.google.com).
+4. **2–3 sample vendor price docs** + **1 sample BOQ** as test fixtures.
+5. **Logo + brand colour** for the PDF header (or default neutral).
 
 With those four, I can have the Library + Chat working end-to-end inside
 48 hours — drop a Polycab PDF, ask about wire prices, get cards back.
