@@ -1,0 +1,10 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+:root {
+  --ui-primary: var(--ui-color-primary-500);
+}
+
+html, body, #__nuxt {
+  height: 100%;
+}
