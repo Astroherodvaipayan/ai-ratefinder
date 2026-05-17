@@ -1,9 +1,8 @@
 import { z } from 'zod'
 
 const Body = z.object({
-  title:     z.string().optional(),
-  vendor_id: z.string().uuid().optional(),
-  status:    z.enum(['pending','ocr','extracting','ready','failed']).optional()
+  title: z.string().optional(),
+  quotation_id: z.string().uuid().nullable().optional()
 })
 
 export default defineEventHandler(async (event) => {
@@ -12,11 +11,9 @@ export default defineEventHandler(async (event) => {
   const body = Body.parse(await readBody(event))
   const client = await userClient(event)
   const { data, error } = await client
-    .from('jobs')
+    .from('chats')
     .update({ ...body, updated_at: new Date().toISOString() })
-    .eq('id', id)
-    .select()
-    .single()
+    .eq('id', id).select().single()
   if (error) throw createError({ statusCode: 500, statusMessage: error.message })
   return data
 })
