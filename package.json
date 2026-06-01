@@ -8,17 +8,16 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "typecheck": "nuxt typecheck",
-    "lint": "eslint ."
+    "typecheck": "nuxt typecheck"
   },
   "dependencies": {
+    "@google/genai": "^1.0.0",
     "@nuxt/ui": "^3.0.0",
     "@nuxtjs/supabase": "^1.4.6",
     "@supabase/supabase-js": "^2.45.0",
     "@vueuse/core": "^11.0.0",
     "@vueuse/nuxt": "^11.0.0",
     "exceljs": "^4.4.0",
-    "fuse.js": "^7.0.0",
     "nuxt": "^4.0.0",
     "pdfmake": "^0.2.10",
     "vue": "^3.5.0",

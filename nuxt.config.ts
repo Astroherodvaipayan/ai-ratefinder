@@ -22,6 +22,7 @@ export default defineNuxtConfig({
 
   runtimeConfig: {
     datalabApiKey: '',
+    geminiApiKey: '',
     supabaseServiceRoleKey: '',
     public: {
       appName: 'AI Ratefinder'

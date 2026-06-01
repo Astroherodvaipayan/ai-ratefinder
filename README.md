@@ -1,22 +1,32 @@
 # AI Ratefinder
 
-Upload vendor price lists and BOQs → OCR with **Datalab Chandra 2** → smart SKU
-matching → quotation export. Chat-style workflow UI built on Nuxt UI v3.
+A private library of vendor price docs you can chat with.
 
-See [`PLAN.md`](./PLAN.md) for the full 35-day delivery plan.
+- Drop vendor PDFs / images / Excel files into the **Library**.
+- **Datalab Chandra 2** OCRs every doc. **Google Gemini 2.5 Flash** turns the
+  parsed markdown into clean structured rows (product · SKU · unit · price ·
+  MOQ · currency · source page) and indexes them in Postgres.
+- Open **Chat** and ask in plain English ("price of polycab 2.5mm wire?").
+  Gemini answers from your library and emits cited price cards.
+- Tap **+ Add to quotation** on any card → tweak qty / discount / GST /
+  freight → **download as PDF or Excel**.
+
+See [`PLAN.md`](./PLAN.md) for the 35-day delivery plan and
+[`FLOW.md`](./FLOW.md) for the flow + mockups.
 
 ## Stack
 
 - Nuxt 4 + Nuxt UI v3 (chat-style shell)
-- Supabase (Postgres + Auth + Storage)
-- Datalab Chandra 2 for OCR
+- Supabase Postgres + Auth + Storage (RLS on every table)
+- Datalab Chandra 2 OCR
+- Google Gemini 2.5 Flash (extraction + RAG chat, JSON-schema constrained)
+- `pdfmake` + `exceljs` for quotation export
 - Vercel for hosting
-- Pure Postgres SKU matching (`tsvector` + `pg_trgm`) — no LLM dependency
 
 ## Local dev
 
 ```bash
-cp .env.example .env       # fill DATALAB_API_KEY + Supabase keys
+cp .env.example .env       # fill all four keys
 npm install
 npm run dev
 ```
@@ -24,15 +34,16 @@ npm run dev
 ## Supabase setup
 
 1. Create a project at supabase.com.
-2. SQL editor → run `supabase/migrations/0001_init.sql`, then `0002_match_fn.sql`.
+2. SQL editor → run `supabase/migrations/0001_init.sql`, then
+   `supabase/migrations/0002_search_fn.sql`.
 3. Storage → create a private bucket called `uploads`.
 4. Authentication → Email provider → enable email + password.
 5. Copy `Project URL`, `anon key`, `service_role key` into `.env`.
 
-## Datalab Chandra 2
+## Keys
 
-Get a key at https://www.datalab.to. The client lives in
-`server/utils/chandra.ts` and uses `POST /api/v1/convert` + polling.
+- **Datalab Chandra 2** — https://www.datalab.to → `DATALAB_API_KEY`
+- **Google AI Studio (Gemini)** — https://aistudio.google.com → `GEMINI_API_KEY`
 
 ## Deploy to Vercel
 
@@ -40,5 +51,30 @@ Get a key at https://www.datalab.to. The client lives in
 npx vercel
 ```
 
-Set the four env vars (`DATALAB_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`,
-`SUPABASE_SERVICE_ROLE_KEY`) in the Vercel project settings.
+Set the four env vars (`DATALAB_API_KEY`, `GEMINI_API_KEY`, `SUPABASE_URL`,
+`SUPABASE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`) in the project settings.
+
+## API surface
+
+| Method | Path                                          | Purpose                                   |
+| -----: | --------------------------------------------- | ----------------------------------------- |
+|    GET | `/api/documents`                              | List docs in your library                 |
+|   POST | `/api/documents`                              | Upload file → OCR → extract → index       |
+|    GET | `/api/documents/:id`                          | Doc + extracted rows                      |
+|    GET | `/api/documents/:id/file`                     | Signed URL to original                    |
+| DELETE | `/api/documents/:id`                          | Remove doc + rows                         |
+|    GET | `/api/chats`                                  | Recent chat threads                       |
+|   POST | `/api/chats`                                  | New chat                                  |
+|    GET | `/api/chats/:id/messages`                     | Full transcript                           |
+|   POST | `/api/chats/:id/messages`                     | Ask Gemini, get answer + cited items      |
+|    GET | `/api/quotations`                             | Your quotations                           |
+|   POST | `/api/quotations`                             | Create draft                              |
+|    GET | `/api/quotations/:id`                         | Quotation + items + live totals           |
+|  PATCH | `/api/quotations/:id`                         | Edit customer / discount / GST / freight  |
+|   POST | `/api/quotations/:id/items`                   | Add line (from doc_item or freeform)      |
+|  PATCH | `/api/quotations/:id/items/:itemId`           | Edit a line                               |
+| DELETE | `/api/quotations/:id/items/:itemId`           | Remove a line                             |
+|    GET | `/api/quotations/:id/export?format=pdf\|xlsx` | Download                                  |
+|    GET | `/api/search?q=…`                             | Free-text search across all doc_items     |
+|    GET | `/api/vendors`                                | List your vendors                         |
+|   POST | `/api/vendors`                                | Create a vendor                           |

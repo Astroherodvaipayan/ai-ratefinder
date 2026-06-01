@@ -16,7 +16,7 @@ scaffold and the Datalab **Chandra 2** OCR API.
 | File storage | **Supabase Storage** | Same vendor as DB + Auth |
 | AI SDK | Vercel AI SDK (`ai`) for streaming UI primitives only | We stream tool-call progress, not LLM tokens |
 | OCR | **Datalab Chandra 2** (`POST /api/v1/convert` + poll) | Required by scope |
-| LLM | **None for MVP** — Chandra markdown parsed with Zod + heuristics; matcher is pure FTS + trigram | User choice; keeps cost to Chandra only. Add Voyage/Claude later if match quality is weak |
+| LLM | **Google Gemini 2.5 Flash** (Pro for hard queries) via `@google/genai` | Used twice: (a) clean Chandra markdown into structured rows at ingest, (b) RAG answers in the chat with JSON-schema-constrained output and citation-by-doc_item_id |
 | Excel parsing | `exceljs` | Price list + BOQ ingest |
 | PDF/Excel export | `pdfmake` + `exceljs` | Quotation export |
 | Fuzzy search | Postgres FTS (`tsvector`) + `pg_trgm` similarity + `fuse.js` for client-side re-rank | Smart search across SKUs |
@@ -161,6 +161,7 @@ ai-ratefinder/
 
 ```
 DATALAB_API_KEY=...                  # Chandra 2 hosted API
+GEMINI_API_KEY=...                   # Google AI Studio (Gemini 2.5 Flash)
 SUPABASE_URL=...
 SUPABASE_KEY=...                     # anon key (client)
 SUPABASE_SERVICE_ROLE_KEY=...        # server-only, for admin tasks

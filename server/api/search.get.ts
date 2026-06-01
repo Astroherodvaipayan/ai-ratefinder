@@ -3,6 +3,10 @@ export default defineEventHandler(async (event) => {
   const { q, limit } = getQuery(event)
   if (typeof q !== 'string' || !q.trim()) return { hits: [] }
   const client = await userClient(event)
-  const hits = await matchProducts(client, q.trim(), Number(limit) || 20)
-  return { hits }
+  const { data, error } = await client.rpc('rf_search_items', {
+    q: q.trim(),
+    lim: Number(limit) || 20
+  })
+  if (error) throw createError({ statusCode: 500, statusMessage: error.message })
+  return { hits: data ?? [] }
 })
