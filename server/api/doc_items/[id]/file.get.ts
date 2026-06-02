@@ -1,4 +1,6 @@
 /** Signed URL for the document that contains this doc_item. */
+import { adminClient } from '../../../utils/supabase'
+
 export default defineEventHandler(async (event) => {
   await requireUser(event)
   const id = getRouterParam(event, 'id')!
@@ -13,7 +15,7 @@ export default defineEventHandler(async (event) => {
   const path = (di as any).documents?.storage_path
   if (!path) throw createError({ statusCode: 404, statusMessage: 'no file' })
 
-  const { data, error: signErr } = await client.storage
+  const { data, error: signErr } = await adminClient().storage
     .from('uploads').createSignedUrl(path, 300)
   if (signErr || !data) throw createError({ statusCode: 500, statusMessage: signErr?.message ?? 'sign failed' })
   return { url: data.signedUrl, page: di.source_page, mime: (di as any).documents?.mime }

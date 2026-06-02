@@ -15,10 +15,12 @@
     "@nuxt/ui": "^3.0.0",
     "@nuxtjs/supabase": "^1.4.6",
     "@supabase/supabase-js": "^2.45.0",
-    "@vueuse/core": "^11.0.0",
-    "@vueuse/nuxt": "^11.0.0",
+    "@vueuse/core": "^14.3.0",
+    "@vueuse/nuxt": "^14.3.0",
     "exceljs": "^4.4.0",
+    "lottie-web": "^5.13.0",
     "nuxt": "^4.0.0",
+    "pdf-parse": "^2.4.5",
     "pdfmake": "^0.2.10",
     "vue": "^3.5.0",
     "vue-router": "^4.4.0",
@@ -27,6 +29,6 @@
   "devDependencies": {
     "@types/pdfmake": "^0.2.9",
     "typescript": "^5.5.0",
-    "vue-tsc": "^2.0.0"
+    "vue-tsc": "^3.3.3"
   }
 }

@@ -8,7 +8,7 @@ export async function userClient(event: H3Event): Promise<SupabaseClient> {
 }
 
 export async function requireUser(event: H3Event) {
-  const user = await serverSupabaseUser(event)
+  const user = await serverSupabaseUser(event).catch(() => null)
   if (!user) {
     throw createError({ statusCode: 401, statusMessage: 'Not authenticated' })
   }

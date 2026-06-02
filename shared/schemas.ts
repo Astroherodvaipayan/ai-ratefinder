@@ -18,7 +18,9 @@ export const ChatItem = z.object({
   unit: z.string().nullable(),
   price: z.number().nullable(),
   moq: z.string().nullable(),
+  currency: z.string().default('INR'),
   vendor: z.string(),
+  source_document: z.string().optional(),
   source_page: z.number().int().nullable(),
   confidence: z.number().min(0).max(1)
 })

@@ -22,7 +22,7 @@ export async function renderQuotationXlsx(q: QuotationForXlsx): Promise<Buffer> 
   const wb = new ExcelJS.Workbook()
   const ws = wb.addWorksheet('Quotation')
 
-  ws.addRow(['Quotation:', q.title])
+  ws.addRow(['Proforma Invoice:', q.title])
   if (q.customer) ws.addRow(['Customer:', q.customer])
   ws.addRow([])
 

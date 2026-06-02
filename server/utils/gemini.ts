@@ -1,15 +1,9 @@
 /**
- * Gemini client — used for two jobs:
+ * Gemini client — chat answer layer only.
  *
- *   1. extractPriceRowsLLM(markdown):
- *      Reads Chandra's markdown for a document and returns clean PriceRow[]
- *      records. We use JSON-schema-constrained output so the response is
- *      always parseable; no regex, no string-mangling.
- *
- *   2. answerFromCandidates(question, candidates, history):
- *      The chat brain. Given the user's question, a short conversation
- *      history, and a set of candidate doc_items + surrounding markdown,
- *      it writes a conversational answer and emits cited price cards.
+ * Given the user's question, a short conversation history, and a set of
+ * candidate doc_items + surrounding markdown, it writes a conversational
+ * answer and emits cited price cards.
  *
  * Default model: gemini-2.5-flash (fast + cheap, 1M-token context).
  */
@@ -29,86 +23,7 @@ function gemini(): GoogleGenAI {
 }
 
 // ---------------------------------------------------------------------------
-// 1) Extract clean rows from Chandra markdown
-// ---------------------------------------------------------------------------
-
-export interface CleanedPriceRow {
-  raw_name: string
-  sku: string | null
-  unit: string | null
-  price: number | null
-  moq: string | null
-  currency: string
-  source_page: number | null
-}
-
-const ROW_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    rows: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          raw_name:    { type: Type.STRING },
-          sku:         { type: Type.STRING, nullable: true },
-          unit:        { type: Type.STRING, nullable: true },
-          price:       { type: Type.NUMBER, nullable: true },
-          moq:         { type: Type.STRING, nullable: true },
-          currency:    { type: Type.STRING },
-          source_page: { type: Type.NUMBER, nullable: true }
-        },
-        required: ['raw_name', 'currency'],
-        propertyOrdering: ['raw_name', 'sku', 'unit', 'price', 'moq', 'currency', 'source_page']
-      }
-    }
-  },
-  required: ['rows']
-}
-
-const EXTRACTION_SYSTEM = `
-You are converting a vendor's price-list document into structured JSON rows.
-You are given the document as Chandra-extracted markdown. Read every table
-and every list, including footnotes that change units or prices.
-
-Rules:
-- One JSON row per distinct product / SKU.
-- Carry units exactly as the doc states them (e.g. "per 90m coil", "pc",
-  "kg", "m"). If a footer says "all prices in ₹/100m", reflect that in the
-  unit.
-- "moq" is the minimum order quantity — capture it as a short string
-  (e.g. "1 coil", "50 pcs"). Leave null if not stated.
-- Price must be a number in the document's currency. Default currency to
-  "INR" if not specified.
-- Do NOT invent products, SKUs, or prices. If a cell is blank, return null.
-- Skip total / subtotal / heading rows.
-- Preserve the page number if it can be inferred from the markdown.
-`.trim()
-
-export async function extractPriceRowsLLM(markdown: string): Promise<CleanedPriceRow[]> {
-  if (!markdown.trim()) return []
-  const res = await gemini().models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: markdown,
-    config: {
-      systemInstruction: EXTRACTION_SYSTEM,
-      responseMimeType: 'application/json',
-      responseSchema: ROW_SCHEMA,
-      temperature: 0.1
-    }
-  })
-
-  const text = res.text ?? '{}'
-  try {
-    const parsed = JSON.parse(text) as { rows?: CleanedPriceRow[] }
-    return parsed.rows ?? []
-  } catch {
-    return []
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 2) Answer a chat question from candidate doc_items
+// Answer a chat question from candidate doc_items
 // ---------------------------------------------------------------------------
 
 export interface CandidateRow {
@@ -121,11 +36,17 @@ export interface CandidateRow {
   currency: string
   vendor: string
   source_document: string
+  source_uploaded_at: string | null
   source_page: number | null
   context_md: string                  // ±10 lines of markdown around the row
 }
 
 export interface ChatTurn { role: 'user' | 'assistant'; content: string }
+
+export interface ChatScope {
+  vendorName?: string | null
+  documentName?: string | null
+}
 
 export interface ChatAnswer {
   answer_text: string
@@ -136,7 +57,9 @@ export interface ChatAnswer {
     unit: string | null
     price: number | null
     moq: string | null
+    currency: string
     vendor: string
+    source_document: string
     source_page: number | null
     confidence: number
   }>
@@ -157,7 +80,9 @@ const ANSWER_SCHEMA = {
           unit:         { type: Type.STRING, nullable: true },
           price:        { type: Type.NUMBER, nullable: true },
           moq:          { type: Type.STRING, nullable: true },
+          currency:     { type: Type.STRING },
           vendor:       { type: Type.STRING },
+          source_document: { type: Type.STRING },
           source_page:  { type: Type.NUMBER, nullable: true },
           confidence:   { type: Type.NUMBER }
         },
@@ -179,14 +104,20 @@ Style:
 - Compare vendors when more than one matches (e.g. "Havells is ₹130
   cheaper per coil than Polycab for the same 2.5 sq.mm grade.").
 - If nothing matches confidently, say so honestly and emit items = [].
+- If the user asks a broad/vague question and candidates span multiple plausible
+  vendors or documents, ask which brand/document they want and emit items = [].
+- If a vendor or document scope is provided, answer only within that scope.
 - Set confidence in [0, 1] reflecting how well the candidate matches the
   user's intent (gauge, brand, length, etc.).
+- If the same product/SKU appears in multiple uploaded documents, prefer the
+  newest source_uploaded_at unless the user explicitly asks for older rates.
 `.trim()
 
 export async function answerFromCandidates(
   question: string,
   candidates: CandidateRow[],
-  history: ChatTurn[] = []
+  history: ChatTurn[] = [],
+  scope: ChatScope = {}
 ): Promise<ChatAnswer> {
   const candidatesBlock = candidates.map(c => ({
     doc_item_id: c.doc_item_id,
@@ -198,6 +129,7 @@ export async function answerFromCandidates(
     currency: c.currency,
     vendor: c.vendor,
     source_document: c.source_document,
+    source_uploaded_at: c.source_uploaded_at,
     source_page: c.source_page,
     surrounding_markdown: c.context_md
   }))
@@ -207,6 +139,12 @@ export async function answerFromCandidates(
       ? `Conversation so far:\n${history.map(h => `${h.role}: ${h.content}`).join('\n')}\n`
       : '',
     `User question:\n${question}\n`,
+    scope.vendorName || scope.documentName
+      ? `Active search scope:\n${JSON.stringify({
+          vendor: scope.vendorName ?? null,
+          document: scope.documentName ?? null
+        }, null, 2)}\n`
+      : '',
     `Candidate rows (the only sources you may cite):\n${JSON.stringify(candidatesBlock, null, 2)}`
   ].join('\n')
 
@@ -226,5 +164,45 @@ export async function answerFromCandidates(
     return JSON.parse(text) as ChatAnswer
   } catch {
     return { answer_text: 'Sorry, I could not parse a confident answer.', items: [] }
+  }
+}
+
+export function constrainChatAnswer(answer: ChatAnswer, candidates: CandidateRow[]): ChatAnswer {
+  const byId = new Map(candidates.map(c => [c.doc_item_id, c]))
+  const seen = new Set<string>()
+
+  const items = (answer.items ?? []).flatMap((item) => {
+    const candidate = byId.get(item.doc_item_id)
+    if (!candidate || candidate.price === null || seen.has(candidate.doc_item_id)) return []
+    seen.add(candidate.doc_item_id)
+
+    const confidence = Number(item.confidence)
+    return [{
+      doc_item_id: candidate.doc_item_id,
+      product_name: candidate.product_name,
+      sku: candidate.sku,
+      unit: candidate.unit,
+      price: candidate.price,
+      moq: candidate.moq,
+      currency: candidate.currency,
+      vendor: candidate.vendor,
+      source_document: candidate.source_document,
+      source_page: candidate.source_page,
+      confidence: Number.isFinite(confidence)
+        ? Math.max(0, Math.min(1, confidence))
+        : 0.5
+    }]
+  })
+
+  if (!items.length) {
+    return {
+      answer_text: answer.answer_text || 'I could not find a confident priced match in your uploaded rate documents.',
+      items
+    }
+  }
+
+  return {
+    answer_text: answer.answer_text || 'I found matching prices in your uploaded rate documents.',
+    items
   }
 }

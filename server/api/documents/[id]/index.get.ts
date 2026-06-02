@@ -17,5 +17,10 @@ export default defineEventHandler(async (event) => {
     .order('source_page', { ascending: true })
     .order('raw_name', { ascending: true })
 
-  return { ...doc, items: items ?? [] }
+  return {
+    ...doc,
+    parsed_with_internal: doc.status === 'parsed' && !doc.chandra_request_id,
+    chandra_request_id: undefined,
+    items: items ?? []
+  }
 })
