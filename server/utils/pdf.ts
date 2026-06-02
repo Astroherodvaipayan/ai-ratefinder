@@ -61,7 +61,7 @@ export async function renderQuotationPdf(q: QuotationForPdf): Promise<Buffer> {
     pageMargins: [36, 48, 36, 48],
     defaultStyle: { font: 'Helvetica', fontSize: 9 },
     content: [
-      { text: 'Quotation', style: 'h1' },
+      { text: 'Proforma Invoice', style: 'h1' },
       { text: q.title, style: 'h2' },
       q.customer ? { text: `Customer: ${q.customer}`, margin: [0, 0, 0, 12] } : '',
       {

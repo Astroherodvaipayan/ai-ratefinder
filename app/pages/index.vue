@@ -1,5 +1,5 @@
 <script setup lang="ts">
-definePageMeta({ middleware: () => navigateTo('/library', { replace: true }) })
+definePageMeta({ middleware: () => navigateTo('/chats', { replace: true }) })
 </script>
 
 <template>

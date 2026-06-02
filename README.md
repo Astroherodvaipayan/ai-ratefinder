@@ -6,10 +6,12 @@ A private library of vendor price docs you can chat with.
 - **Datalab Chandra 2** OCRs every doc. **Google Gemini 2.5 Flash** turns the
   parsed markdown into clean structured rows (product · SKU · unit · price ·
   MOQ · currency · source page) and indexes them in Postgres.
-- Open **Chat** and ask in plain English ("price of polycab 2.5mm wire?").
-  Gemini answers from your library and emits cited price cards.
-- Tap **+ Add to quotation** on any card → tweak qty / discount / GST /
-  freight → **download as PDF or Excel**.
+- Open **Chat** and ask in plain English ("price of polycab 2.5mm wire?" or
+  multiple SKUs at once). Gemini answers from your library and emits cited
+  price cards.
+- Every priced chat answer automatically creates or updates that chat's draft
+  **proforma invoice**. Review qty / discount / GST / freight, then download
+  as **PDF or Excel**.
 
 See [`PLAN.md`](./PLAN.md) for the 35-day delivery plan and
 [`FLOW.md`](./FLOW.md) for the flow + mockups.
@@ -66,7 +68,7 @@ Set the four env vars (`DATALAB_API_KEY`, `GEMINI_API_KEY`, `SUPABASE_URL`,
 |    GET | `/api/chats`                                  | Recent chat threads                       |
 |   POST | `/api/chats`                                  | New chat                                  |
 |    GET | `/api/chats/:id/messages`                     | Full transcript                           |
-|   POST | `/api/chats/:id/messages`                     | Ask Gemini, get answer + cited items      |
+|   POST | `/api/chats/:id/messages`                     | Ask Gemini, get answer + cited items + draft proforma |
 |    GET | `/api/quotations`                             | Your quotations                           |
 |   POST | `/api/quotations`                             | Create draft                              |
 |    GET | `/api/quotations/:id`                         | Quotation + items + live totals           |

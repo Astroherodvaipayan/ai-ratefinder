@@ -1,6 +1,6 @@
 /**
  * Regex-only fallback extractor for Chandra markdown.
- * Used only when the Gemini extractor returns nothing (e.g. quota error).
+ * Used only when Datalab structured extraction returns nothing or fails.
  *
  * Walks each pipe-table in the markdown, matches headers against synonym
  * lists, and emits PriceRow records that survive a Zod check.
@@ -21,8 +21,14 @@ function normaliseHeader(h: string): string {
 
 function matchColumn(headers: string[], syns: string[]): number {
   const n = headers.map(normaliseHeader)
-  for (let i = 0; i < n.length; i++) if (syns.some(s => n[i] === s)) return i
-  for (let i = 0; i < n.length; i++) if (syns.some(s => n[i].includes(s))) return i
+  for (let i = 0; i < n.length; i++) {
+    const header = n[i]
+    if (header && syns.some(s => header === s)) return i
+  }
+  for (let i = 0; i < n.length; i++) {
+    const header = n[i]
+    if (header && syns.some(s => header.includes(s))) return i
+  }
   return -1
 }
 
@@ -39,13 +45,16 @@ function parseMarkdownTables(markdown: string): MdTable[] {
   const tables: MdTable[] = []
   let i = 0
   while (i < lines.length) {
-    const line = lines[i]
-    if (line.includes('|') && lines[i + 1]?.match(/^\s*\|?\s*:?-{3,}/)) {
+    const line = lines[i] ?? ''
+    const nextLine = lines[i + 1] ?? ''
+    if (line.includes('|') && nextLine.match(/^\s*\|?\s*:?-{3,}/)) {
       const header = splitRow(line)
       i += 2
       const rows: string[][] = []
-      while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
-        rows.push(splitRow(lines[i]))
+      while (i < lines.length) {
+        const rowLine = lines[i] ?? ''
+        if (!rowLine.includes('|') || rowLine.trim() === '') break
+        rows.push(splitRow(rowLine))
         i++
       }
       if (header.length >= 2 && rows.length > 0) tables.push({ header, rows })

@@ -17,6 +17,11 @@ export default defineNuxtConfig({
       include: undefined,
       exclude: ['/login', '/signup', '/confirm'],
       saveRedirectToCookie: true
+    },
+    clientOptions: {
+      auth: {
+        flowType: 'implicit'
+      }
     }
   },
 

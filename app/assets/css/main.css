@@ -2,9 +2,79 @@
 @import "@nuxt/ui";
 
 :root {
-  --ui-primary: var(--ui-color-primary-500);
+  /* Primary = soft charcoal (contrast on cream). Scale has no brown/copper. */
+  --ui-color-primary-50: #fdfcfa;
+  --ui-color-primary-100: #f9f7f3;
+  --ui-color-primary-200: #f3f0ea;
+  --ui-color-primary-300: #ebe7df;
+  --ui-color-primary-400: #ddd8cf;
+  --ui-color-primary-500: #b8b4ad;
+  --ui-color-primary-600: #5c5955;
+  --ui-color-primary-700: #4a4844;
+  --ui-color-primary-800: #3a3835;
+  --ui-color-primary-900: #2a2927;
+  --ui-color-primary-950: #1a1918;
+
+  --ui-primary: var(--ui-color-primary-600);
+
+  /* White + light cream only */
+  --ui-bg: #ffffff;
+  --ui-bg-muted: #faf9f6;
+  --ui-bg-elevated: #ffffff;
+  --ui-bg-accented: #f5f3ee;
+  --ui-bg-inverted: #2a2927;
+
+  --ui-border: #eeede8;
+  --ui-border-muted: #f5f4f0;
+  --ui-border-accented: #e8e6e1;
+  --ui-border-inverted: #2a2927;
+
+  --ui-text-dimmed: #a3a3a3;
+  --ui-text-muted: #8a8a8a;
+  --ui-text-toned: #646464;
+  --ui-text: #525252;
+  --ui-text-highlighted: #262626;
+  --ui-text-inverted: #ffffff;
 }
 
-html, body, #__nuxt {
+.dark {
+  --ui-bg: #141414;
+  --ui-bg-muted: #1a1a1a;
+  --ui-bg-elevated: #1f1f1f;
+  --ui-bg-accented: #262626;
+  --ui-bg-inverted: #faf9f6;
+
+  --ui-border: #2e2e2e;
+  --ui-border-muted: #242424;
+  --ui-border-accented: #383838;
+  --ui-border-inverted: #faf9f6;
+
+  --ui-text-dimmed: #737373;
+  --ui-text-muted: #a3a3a3;
+  --ui-text-toned: #d4d4d4;
+  --ui-text: #e5e5e5;
+  --ui-text-highlighted: #faf9f6;
+  --ui-text-inverted: #1a1a1a;
+}
+
+html,
+body,
+#__nuxt {
   height: 100%;
+}
+
+body {
+  background-color: var(--ui-bg);
+  color: var(--ui-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
