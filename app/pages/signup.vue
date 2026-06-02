@@ -1,15 +1,19 @@
 <script setup lang="ts">
+import { navigateAfterAuth } from '~/composables/useAuthSession'
+
 definePageMeta({ layout: false })
 
 const supabase = useSupabaseClient()
-const user = useSupabaseUser()
 const email = ref('')
 const password = ref('')
 const error = ref<string | null>(null)
 const sent = ref(false)
 const loading = ref(false)
 
-watchEffect(() => { if (user.value) navigateTo('/') })
+onMounted(async () => {
+  const { data } = await supabase.auth.getSession()
+  if (data.session) navigateAfterAuth('/chats')
+})
 
 async function submit() {
   loading.value = true

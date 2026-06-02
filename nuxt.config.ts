@@ -18,11 +18,8 @@ export default defineNuxtConfig({
       exclude: ['/login', '/signup', '/confirm'],
       saveRedirectToCookie: true
     },
-    clientOptions: {
-      auth: {
-        flowType: 'implicit'
-      }
-    }
+    // Default PKCE + SSR cookies (do not use implicit flow — it breaks cookie sessions).
+    clientOptions: {}
   },
 
   runtimeConfig: {

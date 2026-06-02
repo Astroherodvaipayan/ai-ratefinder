@@ -1,28 +1,17 @@
 <script setup lang="ts">
+import { hasAuthSession } from '~/composables/useAuthSession'
+
 definePageMeta({ layout: 'default' })
 
 interface Chat { id: string; message_count?: number }
 
-const user = useSupabaseUser()
-const session = useSupabaseSession()
 const supabase = useSupabaseClient()
+const requestFetch = useRequestFetch()
 
-async function hasSession() {
-  if (user.value || session.value) return true
-  if (!import.meta.client) return false
-
-  const { data } = await supabase.auth.getSession()
-  if (!data.session) return false
-
-  session.value = data.session
-  user.value = data.session.user
-  return true
-}
-
-if (!await hasSession()) {
+if (!await hasAuthSession(supabase)) {
   await navigateTo('/login', { replace: true })
 } else {
-  const chats = await $fetch<Chat[]>('/api/chats')
+  const chats = await requestFetch<Chat[]>('/api/chats')
   const empty = chats.find(c => (c.message_count ?? 0) === 0)
 
   if (empty) {
@@ -30,7 +19,7 @@ if (!await hasSession()) {
   } else if (chats[0]) {
     await navigateTo(`/chats/${chats[0].id}`, { replace: true })
   } else {
-    const c = await $fetch<{ id: string }>('/api/chats', { method: 'POST', body: {} })
+    const c = await requestFetch<{ id: string }>('/api/chats', { method: 'POST', body: {} })
     await navigateTo(`/chats/${c.id}`, { replace: true })
   }
 }
