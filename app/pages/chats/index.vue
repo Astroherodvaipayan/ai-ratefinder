@@ -4,8 +4,22 @@ definePageMeta({ layout: 'default' })
 interface Chat { id: string; message_count?: number }
 
 const user = useSupabaseUser()
+const session = useSupabaseSession()
+const supabase = useSupabaseClient()
 
-if (!user.value) {
+async function hasSession() {
+  if (user.value || session.value) return true
+  if (!import.meta.client) return false
+
+  const { data } = await supabase.auth.getSession()
+  if (!data.session) return false
+
+  session.value = data.session
+  user.value = data.session.user
+  return true
+}
+
+if (!await hasSession()) {
   await navigateTo('/login', { replace: true })
 } else {
   const chats = await $fetch<Chat[]>('/api/chats')

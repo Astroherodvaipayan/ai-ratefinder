@@ -34,9 +34,15 @@ async function submit() {
     return
   }
 
-  if (data.session) session.value = data.session
-  if (data.user) user.value = data.user
-  await navigateTo(redirectTarget())
+  const { data: savedSession, error: sessionError } = await supabase.auth.getSession()
+  if (sessionError || !savedSession.session) {
+    error.value = sessionError?.message || 'Signed in, but the browser session was not saved. Please try again.'
+    return
+  }
+
+  session.value = savedSession.session
+  user.value = savedSession.session.user ?? data.user
+  window.location.assign(redirectTarget())
 }
 </script>
 
