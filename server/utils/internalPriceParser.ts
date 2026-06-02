@@ -1,5 +1,4 @@
 import ExcelJS from 'exceljs'
-import { PDFParse } from 'pdf-parse'
 import { PriceRow, type PriceRow as PR } from '~~/shared/schemas'
 
 export interface InternalParseResult {
@@ -403,6 +402,18 @@ function parseTextLines(text: string): PR[] {
 }
 
 async function parsePdf(buffer: Buffer): Promise<InternalParseResult> {
+  const PDFParse = await loadPdfParser()
+  if (!PDFParse) {
+    return {
+      parser: 'unsupported',
+      supported: false,
+      rows: [],
+      markdown: '',
+      pageCount: null,
+      warnings: ['Internal PDF parsing is not available in this runtime, so this PDF should be handled by OCR.']
+    }
+  }
+
   const parser = new PDFParse({ data: new Uint8Array(buffer) })
   try {
     const tableResult = await parser.getTable().catch(() => null)
@@ -439,6 +450,15 @@ async function parsePdf(buffer: Buffer): Promise<InternalParseResult> {
     }
   } finally {
     await parser.destroy()
+  }
+}
+
+async function loadPdfParser() {
+  try {
+    const mod = await import('pdf-parse')
+    return mod.PDFParse
+  } catch {
+    return null
   }
 }
 
