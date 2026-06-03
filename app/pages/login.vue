@@ -1,9 +1,9 @@
 <script setup lang="ts">
+import { hasAuthSession, navigateAfterAuth, waitForAuthSession } from '~/composables/useAuthSession'
+
 definePageMeta({ layout: false })
 
 const supabase = useSupabaseClient()
-const user = useSupabaseUser()
-const session = useSupabaseSession()
 const route = useRoute()
 const email = ref('')
 const password = ref('')
@@ -17,32 +17,38 @@ function redirectTarget() {
     : '/chats'
 }
 
-watchEffect(() => {
-  if (user.value || session.value) navigateTo(redirectTarget())
+onMounted(async () => {
+  if (await hasAuthSession(supabase)) {
+    navigateAfterAuth(redirectTarget())
+  }
 })
 
 async function submit() {
   loading.value = true
   error.value = null
-  const { data, error: err } = await supabase.auth.signInWithPassword({
-    email: email.value,
-    password: password.value
-  })
-  loading.value = false
-  if (err) {
-    error.value = err.message
-    return
-  }
+  try {
+    const { error: err } = await supabase.auth.signInWithPassword({
+      email: email.value,
+      password: password.value
+    })
+    if (err) {
+      error.value = err.message
+      return
+    }
 
-  const { data: savedSession, error: sessionError } = await supabase.auth.getSession()
-  if (sessionError || !savedSession.session) {
-    error.value = sessionError?.message || 'Signed in, but the browser session was not saved. Please try again.'
-    return
+    await waitForAuthSession(supabase)
+    navigateAfterAuth(redirectTarget())
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : 'Could not sign in. Please try again.'
+  } finally {
+    if (import.meta.client && !error.value) {
+      // Keep loading state until the browser navigates away.
+      const stillHere = () => window.location.pathname.startsWith('/login')
+      if (stillHere()) loading.value = false
+    } else {
+      loading.value = false
+    }
   }
-
-  session.value = savedSession.session
-  user.value = savedSession.session.user ?? data.user
-  window.location.assign(redirectTarget())
 }
 </script>
 

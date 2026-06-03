@@ -1,15 +1,19 @@
 <script setup lang="ts">
+import { hasAuthSession, navigateAfterAuth, waitForAuthSession } from '~/composables/useAuthSession'
+
 definePageMeta({ layout: false })
 
 const supabase = useSupabaseClient()
-const user = useSupabaseUser()
-const session = useSupabaseSession()
 const email = ref('')
 const password = ref('')
 const error = ref<string | null>(null)
 const loading = ref(false)
 
-watchEffect(() => { if (user.value || session.value) navigateTo('/chats') })
+onMounted(async () => {
+  if (await hasAuthSession(supabase)) {
+    navigateAfterAuth('/chats')
+  }
+})
 
 async function submit() {
   loading.value = true
@@ -21,23 +25,16 @@ async function submit() {
       body: { email: email.value, password: password.value }
     })
 
-    const { data, error: signInError } = await supabase.auth.signInWithPassword({
+    const { error: signInError } = await supabase.auth.signInWithPassword({
       email: email.value,
       password: password.value
     })
     if (signInError) throw signInError
 
-    const { data: savedSession, error: sessionError } = await supabase.auth.getSession()
-    if (sessionError || !savedSession.session) {
-      throw new Error(sessionError?.message || 'Account created, but the browser session was not saved. Please sign in.')
-    }
-
-    session.value = savedSession.session
-    user.value = savedSession.session.user ?? data.user
-    window.location.assign('/chats')
+    await waitForAuthSession(supabase)
+    navigateAfterAuth('/chats')
   } catch (err) {
     error.value = errorMessage(err)
-  } finally {
     loading.value = false
   }
 }
