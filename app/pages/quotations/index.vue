@@ -7,7 +7,8 @@ interface Quotation {
   updated_at: string
 }
 
-const { data: quotations, refresh } = await useFetch<Quotation[]>('/api/quotations', {
+const { data: quotations, refresh } = useFetch<Quotation[]>('/api/quotations', {
+  lazy: true,
   default: () => []
 })
 
@@ -19,7 +20,8 @@ async function createQuotation() {
     body: { title: newTitle.value.trim() || 'New quotation' }
   })
   newTitle.value = ''
-  await refresh()
+  quotations.value = [q, ...quotations.value]
+  void refresh()
   router.push(`/quotations/${q.id}`)
 }
 

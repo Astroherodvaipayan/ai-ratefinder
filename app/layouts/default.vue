@@ -3,8 +3,10 @@ const user = useSupabaseUser()
 const route = useRoute()
 
 interface Chat { id: string; title: string; updated_at: string; message_count?: number }
-const { data: chats, refresh: fetchChats } = await useFetch<Chat[]>('/api/chats', {
+const { data: chats, refresh: fetchChats } = useFetch<Chat[]>('/api/chats', {
+  key: 'sidebar-chats',
   default: () => [],
+  lazy: true,
   immediate: Boolean(user.value),
   watch: false
 })
@@ -38,26 +40,7 @@ async function newChat() {
     return
   }
 
-  const currentId = route.params.id as string | undefined
-  if (currentId && route.path.startsWith('/chats/')) {
-    const msgs = await $fetch<unknown[]>(`/api/chats/${currentId}/messages`).catch(() => [])
-    if (!msgs.length) return
-  }
-
-  await refreshChats()
-  const existingEmpty = chats.value.find(c => (c.message_count ?? 0) === 0)
-  if (existingEmpty) {
-    if (route.params.id !== existingEmpty.id) {
-      await navigateTo(`/chats/${existingEmpty.id}`)
-    }
-    return
-  }
-
-  const c = await $fetch<Chat>('/api/chats', { method: 'POST', body: {} })
-  await refreshChats()
-  if (route.params.id !== c.id) {
-    await navigateTo(`/chats/${c.id}`)
-  }
+  if (route.path !== '/chats') await navigateTo('/chats')
 }
 
 async function signOut() {

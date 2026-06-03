@@ -15,7 +15,7 @@ interface Doc {
   vendor: { id: string; name: string } | null
 }
 
-const { data: docs, refresh } = await useFetch<Doc[]>('/api/documents', { default: () => [] })
+const { data: docs, refresh } = useFetch<Doc[]>('/api/documents', { default: () => [], lazy: true })
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const vendorName = ref('')

@@ -22,7 +22,8 @@ interface Quotation {
   items: Item[]; totals: Totals
 }
 
-const { data: q, refresh } = await useFetch<Quotation>(() => `/api/quotations/${id.value}`, {
+const { data: q, refresh } = useFetch<Quotation>(() => `/api/quotations/${id.value}`, {
+  lazy: true,
   default: () => null as any
 })
 

@@ -15,7 +15,8 @@ interface DocDetail {
   }>
 }
 
-const { data: doc, refresh } = await useFetch<DocDetail>(() => `/api/documents/${id.value}`, {
+const { data: doc, refresh } = useFetch<DocDetail>(() => `/api/documents/${id.value}`, {
+  lazy: true,
   default: () => null as any
 })
 

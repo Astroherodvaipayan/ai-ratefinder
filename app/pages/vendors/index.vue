@@ -17,8 +17,8 @@ interface Doc {
   vendor: { id: string; name: string } | null
 }
 
-const { data: vendors, refresh: refreshVendors } = await useFetch<Vendor[]>('/api/vendors', { default: () => [] })
-const { data: docs, refresh: refreshDocs } = await useFetch<Doc[]>('/api/documents', { default: () => [] })
+const { data: vendors, refresh: refreshVendors } = useFetch<Vendor[]>('/api/vendors', { default: () => [], lazy: true })
+const { data: docs, refresh: refreshDocs } = useFetch<Doc[]>('/api/documents', { default: () => [], lazy: true })
 
 const name = ref('')
 const iconByVendor = ref<Record<string, string>>({})
@@ -62,9 +62,10 @@ function setIcon(vendorId: string, icon: string) {
 
 async function add() {
   if (!name.value.trim()) return
-  await $fetch('/api/vendors', { method: 'POST', body: { name: name.value.trim() } })
+  const created = await $fetch<Vendor>('/api/vendors', { method: 'POST', body: { name: name.value.trim() } })
+  vendors.value = [created, ...vendors.value]
   name.value = ''
-  await Promise.all([refreshVendors(), refreshDocs()])
+  void Promise.all([refreshVendors(), refreshDocs()])
 }
 
 onMounted(() => {

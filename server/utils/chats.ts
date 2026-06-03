@@ -39,12 +39,8 @@ export async function findReusableEmptyChat(client: SupabaseClient) {
   return empty ? chatRowWithoutCount(empty) : null
 }
 
-/** Resolve the chat users should land on after auth: reusable empty, recent, or new. */
+/** Resolve the chat users should land on after auth. */
 export async function ensureLandingChat(client: SupabaseClient, ownerId: string) {
-  const data = await recentChatsWithCounts(client, 30)
-  const existing = data.find(row => chatMessageCount(row) === 0) ?? data[0]
-  if (existing) return chatRowWithoutCount(existing)
-
   const { data: created, error } = await client.from('chats').insert({
     owner_id: ownerId,
     title: 'New chat',

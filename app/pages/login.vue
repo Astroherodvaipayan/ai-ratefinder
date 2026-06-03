@@ -10,8 +10,6 @@ const password = ref('')
 const error = ref<string | null>(null)
 const loading = ref(false)
 
-interface LandingChat { id: string }
-
 function redirectTarget() {
   const redirect = route.query.redirect
   return typeof redirect === 'string' && redirect.startsWith('/')
@@ -21,14 +19,7 @@ function redirectTarget() {
 
 async function postLoginTarget() {
   const target = redirectTarget()
-  if (target !== '/chats') return target
-
-  try {
-    const chat = await $fetch<LandingChat>('/api/chats/landing')
-    return chat.id ? `/chats/${chat.id}` : target
-  } catch {
-    return target
-  }
+  return target
 }
 
 onMounted(async () => {

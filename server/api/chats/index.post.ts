@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { findReusableEmptyChat } from '../../utils/chats'
 
 const Body = z.object({
   title: z.string().optional(),
@@ -10,12 +9,6 @@ export default defineEventHandler(async (event) => {
   const user = await requireUser(event)
   const body = Body.parse((await readBody(event).catch(() => ({}))) ?? {})
   const client = await userClient(event)
-
-  const wantsNew = body.title !== undefined || body.quotation_id !== undefined
-  if (!wantsNew) {
-    const existing = await findReusableEmptyChat(client)
-    if (existing) return existing
-  }
 
   const { data, error } = await client.from('chats').insert({
     owner_id: user.id,

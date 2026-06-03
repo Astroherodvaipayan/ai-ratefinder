@@ -91,7 +91,8 @@ const sarvamLanguageOptions: Array<{ value: SarvamLanguage; label: string }> = [
   { value: 'sd-IN', label: 'Sindhi' }
 ]
 
-const { data: settings, refresh: refreshSettings } = await useFetch<{ parser_mode: ParserMode; sarvam_language: SarvamLanguage }>('/api/admin/parser-settings', {
+const { data: settings, refresh: refreshSettings } = useFetch<{ parser_mode: ParserMode; sarvam_language: SarvamLanguage }>('/api/admin/parser-settings', {
+  lazy: true,
   default: () => ({ parser_mode: 'auto' as ParserMode, sarvam_language: 'en-IN' as SarvamLanguage })
 })
 

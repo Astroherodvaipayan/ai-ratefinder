@@ -30,19 +30,20 @@ interface Doc {
   vendor: { id: string; name: string } | null
 }
 
-const { data: chat, refresh: refreshChat } = await useFetch<Chat | null>(
+const { data: chat, refresh: refreshChat } = useFetch<Chat | null>(
   () => `/api/chats/${id.value}`,
-  { default: () => null, immediate: Boolean(user.value), watch: false }
+  { default: () => null, lazy: true, immediate: Boolean(user.value) }
 )
-const { data: messages, refresh } = await useFetch<Message[]>(
+const { data: messages, refresh } = useFetch<Message[]>(
   () => `/api/chats/${id.value}/messages`,
-  { default: () => [], immediate: Boolean(user.value), watch: false }
+  { default: () => [], lazy: true, immediate: Boolean(user.value) }
 )
-const { data: quotations, refresh: refreshQuotations } = await useFetch<Quotation[]>(
-  '/api/quotations', { default: () => [], immediate: Boolean(user.value), watch: false }
+const { data: quotations, refresh: refreshQuotations } = useFetch<Quotation[]>(
+  '/api/quotations', { default: () => [], lazy: true, immediate: Boolean(user.value), watch: false }
 )
-const { data: docs, refresh: refreshDocs } = await useFetch<Doc[]>('/api/documents', {
+const { data: docs, refresh: refreshDocs } = useFetch<Doc[]>('/api/documents', {
   default: () => [],
+  lazy: true,
   immediate: Boolean(user.value),
   watch: false
 })
@@ -165,16 +166,17 @@ async function send() {
   sending.value = true
   error.value = null
   // Optimistic user message
+  const optimisticId = 'tmp-' + Date.now()
   messages.value = [
     ...messages.value,
-    { id: 'tmp-' + Date.now(), role: 'user', content, items: null, created_at: new Date().toISOString() }
+    { id: optimisticId, role: 'user', content, items: null, created_at: new Date().toISOString() }
   ]
   input.value = ''
   await nextTick()
   scrollToBottom()
 
   try {
-    await $fetch<Message>(`/api/chats/${id.value}/messages`, {
+    const assistant = await $fetch<Message>(`/api/chats/${id.value}/messages`, {
       method: 'POST',
       body: {
         content,
@@ -182,12 +184,19 @@ async function send() {
         document_id: selectedDocumentId.value || undefined
       }
     })
-    await refresh()
-    await refreshChat()
-    await refreshQuotations()
+    messages.value = [...messages.value, assistant]
+    if (chat.value?.title === 'New chat') {
+      chat.value = { ...chat.value, title: content.slice(0, 60) }
+    }
+    void Promise.all([
+      refreshChat(),
+      refreshQuotations(),
+      refreshNuxtData('sidebar-chats')
+    ])
     await nextTick()
     scrollToBottom()
   } catch (err: any) {
+    messages.value = messages.value.filter(message => message.id !== optimisticId)
     error.value = err?.statusMessage || err?.message || 'Failed to send'
   } finally {
     sending.value = false
@@ -504,6 +513,6 @@ async function onDocumentsUploaded() {
       </form>
     </footer>
 
-    <DocumentUploadModal v-model:open="uploadOpen" @uploaded="onDocumentsUploaded" />
+    <LazyDocumentUploadModal v-model:open="uploadOpen" @uploaded="onDocumentsUploaded" />
   </div>
 </template>
