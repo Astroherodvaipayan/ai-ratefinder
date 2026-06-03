@@ -3,10 +3,20 @@ import type { Session, SupabaseClient } from '@supabase/supabase-js'
 /** Wait until Supabase has persisted a session after sign-in/sign-up. */
 export async function waitForAuthSession(
   supabase: SupabaseClient,
-  timeoutMs = 12_000
+  timeoutMs = 4_000,
+  sessionHint?: Session | null
 ): Promise<Session> {
+  if (sessionHint) {
+    syncAuthRefs(sessionHint)
+    const existing = await supabase.auth.getSession()
+    return existing.data.session ?? sessionHint
+  }
+
   const existing = await supabase.auth.getSession()
-  if (existing.data.session) return existing.data.session
+  if (existing.data.session) {
+    syncAuthRefs(existing.data.session)
+    return existing.data.session
+  }
 
   return await new Promise<Session>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -19,10 +29,18 @@ export async function waitForAuthSession(
       if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'TOKEN_REFRESHED') {
         clearTimeout(timer)
         subscription.unsubscribe()
+        syncAuthRefs(session)
         resolve(session)
       }
     })
   })
+}
+
+function syncAuthRefs(session: Session) {
+  const user = useSupabaseUser()
+  const sessionRef = useSupabaseSession()
+  sessionRef.value = session
+  user.value = session.user
 }
 
 /** Full navigation so SSR picks up auth cookies on the next page. */

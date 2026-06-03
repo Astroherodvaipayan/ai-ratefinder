@@ -164,7 +164,10 @@ function firstTextColumn(row: string[]): number {
 }
 
 function parseMiniRateTables(rows: string[][], sourcePage: number | null): PR[] {
-  const out = parseSideBySideMiniRateTables(rows, sourcePage)
+  const out = [
+    ...parseSideBySideMiniRateTables(rows, sourcePage),
+    ...parseInlineSectionRateRows(rows, sourcePage)
+  ]
   let sectionTitle = ''
 
   for (let i = 0; i < rows.length; i++) {
@@ -213,6 +216,55 @@ function parseMiniRateTables(rows: string[][], sourcePage: number | null): PR[] 
   }
 
   return dedupeRows(out)
+}
+
+function parseInlineSectionRateRows(rows: string[][], sourcePage: number | null): PR[] {
+  const out: PR[] = []
+  let sectionTitle = ''
+
+  for (const row of rows) {
+    if (looksLikeSectionTitle(row)) {
+      sectionTitle = normaliseCell(row.find(Boolean))
+      continue
+    }
+    if (!sectionTitle) continue
+
+    const line = row.map(normaliseCell).filter(Boolean).join(' ')
+    out.push(...parseInlineSectionRateLine(sectionTitle, line, sourcePage))
+  }
+
+  return out
+}
+
+function parseInlineSectionRateLine(sectionTitle: string, line: string, sourcePage: number | null): PR[] {
+  const itemMatch = normaliseCell(line).match(/^([A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|\d[A-Za-z0-9./-]*)\s+(.+)$/)
+  if (!itemMatch) return []
+
+  const itemKey = itemMatch[1]?.trim() ?? ''
+  const rest = itemMatch[2] ?? ''
+  if (itemKey.length < 2 || !/[a-z0-9]/i.test(itemKey)) return []
+
+  const rows: PR[] = []
+  const ratePattern = /((?:\d+(?:\.\d+)?\s*)?(?:mtrs?\.?|meters?|meter|coil|roll|pair|core|nos?\.?|pcs?\.?))\s+(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d{1,2})?)/gi
+  for (const match of rest.matchAll(ratePattern)) {
+    const rateHeader = normaliseCell(match[1])
+    const price = parseNumber(match[2])
+    if (!rateHeader || price === null) continue
+
+    const candidate: PR = {
+      raw_name: [sectionTitle, itemKey, rateHeader].filter(Boolean).join(' '),
+      sku: itemKey,
+      unit: `per ${rateHeader}`,
+      price,
+      moq: null,
+      currency: 'INR',
+      source_page: sourcePage
+    }
+    const parsed = PriceRow.safeParse(candidate)
+    if (parsed.success) rows.push(parsed.data)
+  }
+
+  return rows
 }
 
 function parseSideBySideMiniRateTables(rows: string[][], sourcePage: number | null): PR[] {
@@ -378,9 +430,23 @@ function parseCsv(buffer: Buffer): InternalParseResult {
 
 function parseTextLines(text: string): PR[] {
   const rows: PR[] = []
+  let sectionTitle = ''
   for (const line of text.split('\n')) {
     const trimmed = line.replace(/\s+/g, ' ').trim()
     if (trimmed.length < 8 || /^total\b/i.test(trimmed)) continue
+
+    if (looksLikeSectionTitleCell(trimmed)) {
+      sectionTitle = trimmed
+      continue
+    }
+
+    if (sectionTitle) {
+      const inlineRows = parseInlineSectionRateLine(sectionTitle, trimmed, null)
+      if (inlineRows.length) {
+        rows.push(...inlineRows)
+        continue
+      }
+    }
 
     const match = trimmed.match(/^(.+?)\s+(₹|rs\.?|inr)?\s*([\d,]+(?:\.\d{1,2})?)\s*(\/-)?(?:\s+(per\s+.+|each|ea|pc|pcs|nos?|mtr|meter|kg|box|coil|roll))?$/i)
     if (!match) continue
