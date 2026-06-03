@@ -5,12 +5,13 @@
  * cell without us shipping the whole document.
  */
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { load as loadHtml } from 'cheerio'
 import type { CandidateRow } from './gemini'
 import { parsePriceRowsFromGrid } from './internalPriceParser'
 
 const CONTEXT_RADIUS = 10  // lines on either side of the matched row
 const MAX_SEARCH_SHARDS = 10
-const MARKDOWN_RECOVERY_DOC_LIMIT = 20
+const MARKDOWN_RECOVERY_DOC_LIMIT = 100
 const MARKDOWN_RECOVERY_ROW_LIMIT = 80
 const NORMALIZED_FALLBACK_ROW_LIMIT = 500
 
@@ -32,7 +33,10 @@ export interface RetrievalFilters {
 function neighbourhood(markdown: string, needle: string | null): string {
   if (!markdown || !needle) return ''
   const lines = markdown.split('\n')
-  const idx = lines.findIndex(l => l.includes(needle))
+  const compactNeedle = compactSearchText(needle)
+  const idx = lines.findIndex((line) =>
+    line.includes(needle) || (compactNeedle.length > 4 && compactSearchText(line).includes(compactNeedle))
+  )
   if (idx < 0) return ''
   const start = Math.max(0, idx - CONTEXT_RADIUS)
   const end   = Math.min(lines.length, idx + CONTEXT_RADIUS + 1)
@@ -178,7 +182,14 @@ export async function retrieveCandidates(
 }
 
 function normaliseSearchText(text: string) {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return text
+    .toLowerCase()
+    .replace(/\bmet(?:er|re)s?\b/g, 'mtr')
+    .replace(/\bmtrs?\.?\b/g, 'mtr')
+    .replace(/\btransparent\b/g, 'transparent')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 function compactSearchText(text: string) {
@@ -195,8 +206,8 @@ function queryIntentTokens(question: string) {
   ])
   return unique(normaliseSearchText(question)
     .split(' ')
-    .filter(token => token.length >= 3 && !stop.has(token)))
-    .slice(0, 6)
+    .filter(token => (/^\d+$/.test(token) ? token.length >= 1 : token.length >= 3) && !stop.has(token)))
+    .slice(0, 8)
 }
 
 function shouldRecoverFromMarkdown(
@@ -248,6 +259,42 @@ function markdownTables(markdown: string): string[][][] {
   return tables
 }
 
+function htmlTables(markdown: string): string[][][] {
+  if (!/<table[\s>]/i.test(markdown)) return []
+
+  const $ = loadHtml(markdown)
+  const tables: string[][][] = []
+  $('table').each((_, table) => {
+    const rows: string[][] = []
+    $(table).find('tr').each((__, tr) => {
+      const cells = $(tr)
+        .children('th,td')
+        .map((___, cell) => $(cell).text().replace(/\s+/g, ' ').trim())
+        .get()
+        .filter(Boolean)
+      if (cells.length) rows.push(cells)
+    })
+    if (rows.length >= 2) tables.push(rows)
+  })
+  return tables
+}
+
+function htmlTextBlocks(markdown: string): string[][][] {
+  if (!/<\/?[a-z][\s\S]*>/i.test(markdown)) return []
+
+  const $ = loadHtml(markdown)
+  $('script,style,noscript').remove()
+  $('br').replaceWith('\n')
+
+  const rows: string[][] = []
+  $('tr,p,li,div,h1,h2,h3,h4,h5,h6').each((_, element) => {
+    const text = $(element).text().replace(/\s+/g, ' ').trim()
+    if (text) rows.push([text])
+  })
+
+  return rows.length >= 2 ? [rows] : []
+}
+
 function markdownLineBlocks(markdown: string): string[][][] {
   const lines = markdown.split('\n').map(line => line.trim()).filter(Boolean)
   const blocks: string[][][] = []
@@ -289,14 +336,75 @@ function rowsMatchingQuestion(markdown: string, question: string) {
   const tokens = queryIntentTokens(question)
   if (!tokens.length) return []
 
-  const grids = [...markdownTables(markdown), ...markdownLineBlocks(markdown)]
+  const grids = [
+    ...htmlTables(markdown),
+    ...markdownTables(markdown),
+    ...markdownLineBlocks(markdown),
+    ...htmlTextBlocks(markdown)
+  ]
   return grids
-    .flatMap(grid => parsePriceRowsFromGrid(grid))
+    .flatMap(grid => [
+      ...parsePriceRowsFromGrid(grid),
+      ...visibleRowsMatchingQuestion(grid, tokens)
+    ])
     .filter(row => {
       const haystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''}`)
       return tokens.every(token => haystack.includes(token))
     })
     .slice(0, MARKDOWN_RECOVERY_ROW_LIMIT)
+}
+
+function visibleRowsMatchingQuestion(grid: string[][], tokens: string[]) {
+  const rows: ReturnType<typeof parsePriceRowsFromGrid> = []
+  let sectionTitle = ''
+
+  for (const row of grid) {
+    const cells = row.map(cell => cell.replace(/\s+/g, ' ').trim()).filter(Boolean)
+    if (!cells.length) continue
+
+    const rowText = cells.join(' ')
+    if (cells.length === 1 && /\b(cables?|wires?|speaker|telephone|cctv|lan|transparent)\b/i.test(rowText)) {
+      sectionTitle = rowText
+    }
+
+    const combined = [sectionTitle, rowText].filter(Boolean).join(' ')
+    const haystack = compactSearchText(combined)
+    if (!tokens.every(token => haystack.includes(token))) continue
+
+    const candidate = {
+      raw_name: combined.slice(0, 240),
+      sku: null,
+      unit: extractUnit(combined),
+      price: extractVisiblePrice(cells),
+      moq: null,
+      currency: 'INR',
+      source_page: null
+    }
+    rows.push(candidate)
+  }
+
+  return rows
+}
+
+function extractUnit(text: string) {
+  const match = text.match(/\b\d+(?:\.\d+)?\s*(?:mtrs?\.?|met(?:er|re)s?|mtr|coil|roll|pair|core|nos?\.?|pcs?\.?)\b/i)
+  return match?.[0]?.replace(/\s+/g, ' ').trim() ?? null
+}
+
+function extractVisiblePrice(cells: string[]) {
+  const moneyCell = cells.find(cell => /(?:₹|rs\.?|inr)\s*[\d,]+(?:\.\d{1,2})?/i.test(cell))
+  const source = moneyCell ?? cells.slice().reverse().find(cell =>
+    /^[\s₹$]*(?:rs\.?|inr)?\s*[\d,]+(?:\.\d{1,2})?\s*(?:\/-)?\s*$/i.test(cell)
+    && !/\b(?:mtrs?\.?|met(?:er|re)s?|mtr|nos?\.?|pcs?\.?)\b/i.test(cell)
+  )
+  if (!source) return null
+
+  const cleaned = source
+    .replace(/[₹$,\s]/g, '')
+    .replace(/\b(rs|inr)\b/gi, '')
+    .replace(/[^\d.\-]/g, '')
+  const value = Number(cleaned)
+  return Number.isFinite(value) ? value : null
 }
 
 async function recoverMarkdownDocItems(
@@ -308,24 +416,9 @@ async function recoverMarkdownDocItems(
     documentIds: string[]
   }
 ) {
-  let query = client
-    .from('documents')
-    .select('id, parsed_markdown')
-    .eq('status', 'parsed')
-    .not('parsed_markdown', 'is', null)
-    .order('created_at', { ascending: false })
-    .limit(MARKDOWN_RECOVERY_DOC_LIMIT)
+  const docs = await fetchMarkdownRecoveryDocs(client, params)
 
-  if (params.documentId) {
-    query = query.eq('id', params.documentId)
-  } else if (params.documentIds.length) {
-    query = query.in('id', params.documentIds)
-  }
-
-  const { data: docs, error } = await query
-  if (error) throw createError({ statusCode: 500, statusMessage: error.message })
-
-  const rows = (docs ?? []).flatMap(doc =>
+  const rows = docs.flatMap(doc =>
     rowsMatchingQuestion((doc.parsed_markdown as string) ?? '', params.question)
       .map(row => ({
         owner_id: params.ownerId,
@@ -371,6 +464,51 @@ async function recoverMarkdownDocItems(
   const { error: insertError } = await client.from('doc_items').insert(toInsert)
   if (insertError) throw createError({ statusCode: 500, statusMessage: insertError.message })
   return toInsert.length
+}
+
+async function fetchMarkdownRecoveryDocs(
+  client: SupabaseClient,
+  params: {
+    question: string
+    documentId?: string | null
+    documentIds: string[]
+  }
+) {
+  const applyScope = (query: any) => {
+    if (params.documentId) return query.eq('id', params.documentId)
+    if (params.documentIds.length) return query.in('id', params.documentIds)
+    return query
+  }
+
+  const baseQuery = () => applyScope(client
+    .from('documents')
+    .select('id, parsed_markdown')
+    .eq('status', 'parsed')
+    .not('parsed_markdown', 'is', null))
+
+  const textTokens = queryIntentTokens(params.question)
+    .filter(token => !/^\d+$/.test(token) && token !== 'mtr')
+    .slice(0, 4)
+
+  if (textTokens.length) {
+    let tokenQuery = baseQuery()
+      .order('created_at', { ascending: false })
+      .limit(MARKDOWN_RECOVERY_DOC_LIMIT)
+
+    for (const token of textTokens) {
+      tokenQuery = tokenQuery.ilike('parsed_markdown', `%${token}%`)
+    }
+
+    const { data, error } = await tokenQuery
+    if (error) throw createError({ statusCode: 500, statusMessage: error.message })
+    if (data?.length) return data as Array<{ id: string; parsed_markdown: string | null }>
+  }
+
+  const { data, error } = await baseQuery()
+    .order('created_at', { ascending: false })
+    .limit(MARKDOWN_RECOVERY_DOC_LIMIT)
+  if (error) throw createError({ statusCode: 500, statusMessage: error.message })
+  return (data ?? []) as Array<{ id: string; parsed_markdown: string | null }>
 }
 
 async function documentIdsForVendor(client: SupabaseClient, vendorId: string): Promise<string[]> {
