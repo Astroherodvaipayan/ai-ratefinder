@@ -10,8 +10,10 @@ import type { CandidateRow } from './gemini'
 import { parsePriceRowsFromGrid } from './internalPriceParser'
 
 const CONTEXT_RADIUS = 10  // lines on either side of the matched row
-const MAX_SEARCH_SHARDS = 10
-const MARKDOWN_RECOVERY_DOC_LIMIT = 100
+const MAX_SEARCH_SHARDS = 6
+const MARKDOWN_RECOVERY_SCOPED_DOC_LIMIT = 100
+const MARKDOWN_RECOVERY_TARGETED_DOC_LIMIT = 25
+const MARKDOWN_RECOVERY_FALLBACK_DOC_LIMIT = 30
 const MARKDOWN_RECOVERY_ROW_LIMIT = 80
 const NORMALIZED_FALLBACK_ROW_LIMIT = 500
 
@@ -69,7 +71,9 @@ export function searchShards(question: string): string[] {
     .map(s => s.trim())
     .filter(s => s.length >= 2)
 
-  const skuLike = question.match(/[A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|[A-Za-z]*\d[A-Za-z0-9./-]*|[A-Z]{2,}[A-Z0-9./-]*/g) ?? []
+  const skuLike = (question.match(/[A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|[A-Za-z]*\d[A-Za-z0-9./-]*|[A-Z]{2,}[A-Z0-9./-]*/g) ?? [])
+    .map(s => s.trim())
+    .filter(isUsefulSkuShard)
   const baseTexts = unique([question, ...clauses, ...coAxialVariants(question)])
   const punctuationVariants = baseTexts
     .flatMap(text => [
@@ -83,8 +87,18 @@ export function searchShards(question: string): string[] {
     question.trim(),
     ...clauses,
     ...punctuationVariants,
-    ...skuLike.map(s => s.trim())
+    ...skuLike
   ].filter(Boolean)).slice(0, MAX_SEARCH_SHARDS)
+}
+
+function isUsefulSkuShard(value: string) {
+  const normalised = normaliseSearchText(value)
+  if (!normalised) return false
+  if (/^\d+$/.test(normalised)) return true
+  if (/[\d./_-]/.test(value)) return true
+  if (normalised.length <= 3) return true
+  if (['cat6', 'frls', 'xlpe', 'pvc'].includes(normalised)) return true
+  return false
 }
 
 export async function retrieveCandidates(
@@ -102,27 +116,10 @@ export async function retrieveCandidates(
   ])
   const hasScope = Boolean(filters.documentId || filters.vendorId)
 
-  const rowsById = new Map<string, RetrievedRow>()
-
-  for (const [queryIndex, shard] of searchShards(question).entries()) {
-    const { data: hits, error } = await client.rpc('rf_search_items', {
-      q: shard, lim: queryIndex === 0 ? limit : Math.max(5, Math.ceil(limit / 2))
-    })
-    if (error) throw createError({ statusCode: 500, statusMessage: error.message })
-
-    for (const [hitIndex, hit] of ((hits ?? []) as any[]).entries()) {
-      if (hasScope && !allowedDocumentIds.has(hit.document_id)) continue
-      const existing = rowsById.get(hit.doc_item_id)
-      const rank = queryIndex * 100 + hitIndex
-      if (!existing || rank < existing.rank) {
-        rowsById.set(hit.doc_item_id, { ...hit, rank })
-      }
-    }
-  }
-
-  let rows = [...rowsById.values()]
-    .sort((a, b) => a.rank - b.rank)
-    .slice(0, limit)
+  let rows = await searchRows(client, question, limit, {
+    documentIds: hasScope ? allowedDocumentIds : null,
+    stopWhen: candidateRows => !shouldRecoverFromMarkdown(question, candidateRows)
+  })
 
   if (shouldRecoverFromMarkdown(question, rows)) {
     const fallbackRows = await retrieveNormalizedFallback(client, question, limit, {
@@ -181,6 +178,75 @@ export async function retrieveCandidates(
   }))
 }
 
+export async function searchDocItemHits(
+  client: SupabaseClient,
+  question: string,
+  limit = 20
+) {
+  return (await searchRows(client, question, limit))
+    .map(({ rank: _rank, ...hit }) => hit)
+}
+
+async function searchRows(
+  client: SupabaseClient,
+  question: string,
+  limit: number,
+  options: {
+    documentIds?: Set<string> | string[] | null
+    stopWhen?: (rows: RetrievedRow[]) => boolean
+  } = {}
+): Promise<RetrievedRow[]> {
+  const shards = searchShards(question)
+  const rowsById = new Map<string, RetrievedRow>()
+  const documentIds = options.documentIds
+    ? new Set(Array.isArray(options.documentIds) ? options.documentIds : [...options.documentIds])
+    : null
+
+  const addHits = (hits: any[], queryIndex: number) => {
+    for (const [hitIndex, hit] of hits.entries()) {
+      if (documentIds && !documentIds.has(hit.document_id)) continue
+      const existing = rowsById.get(hit.doc_item_id)
+      const rank = queryIndex * 100 + hitIndex
+      if (!existing || rank < existing.rank) {
+        rowsById.set(hit.doc_item_id, { ...hit, rank })
+      }
+    }
+  }
+
+  const runShard = async (shard: string, queryIndex: number) => {
+    const { data, error } = await client.rpc('rf_search_items', {
+      q: shard,
+      lim: queryIndex === 0 ? limit : Math.max(5, Math.ceil(limit / 2))
+    })
+    if (error) throw createError({ statusCode: 500, statusMessage: error.message })
+    return { queryIndex, hits: (data ?? []) as any[] }
+  }
+
+  if (!shards.length) return []
+
+  const primary = await runShard(shards[0]!, 0)
+  addHits(primary.hits, primary.queryIndex)
+
+  let rows = sortedSearchRows(rowsById, limit)
+  if (options.stopWhen?.(rows)) return rows
+
+  const remaining = await Promise.all(
+    shards.slice(1).map((shard, index) => runShard(shard, index + 1))
+  )
+  for (const result of remaining) addHits(result.hits, result.queryIndex)
+
+  rows = sortedSearchRows(rowsById, limit)
+  return rows
+}
+
+function sortedSearchRows(rowsById: Map<string, RetrievedRow>, limit: number) {
+  return [...rowsById.values()]
+    .sort((a, b) =>
+      (b.score ?? 0) - (a.score ?? 0) || a.rank - b.rank
+    )
+    .slice(0, limit)
+}
+
 function normaliseSearchText(text: string) {
   return text
     .toLowerCase()
@@ -212,14 +278,14 @@ function queryIntentTokens(question: string) {
 
 function shouldRecoverFromMarkdown(
   question: string,
-  rows: Array<{ raw_name: string; sku: string | null }>
+  rows: Array<{ raw_name: string; sku: string | null; unit?: string | null; price?: number | null }>
 ) {
   const tokens = queryIntentTokens(question)
   if (!tokens.length) return !rows.length
   if (!rows.length) return true
 
   return !rows.some(row => {
-    const haystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''}`)
+    const haystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''}`)
     return tokens.every(token => haystack.includes(token))
   })
 }
@@ -336,22 +402,37 @@ function rowsMatchingQuestion(markdown: string, question: string) {
   const tokens = queryIntentTokens(question)
   if (!tokens.length) return []
 
-  const grids = [
+  const structuredGrids = [
     ...htmlTables(markdown),
     ...markdownTables(markdown),
-    ...markdownLineBlocks(markdown),
-    ...htmlTextBlocks(markdown)
+    ...markdownLineBlocks(markdown)
   ]
-  return grids
-    .flatMap(grid => [
+  const structuredRows = rowsMatchingTokens(structuredGrids, tokens)
+  if (structuredRows.some(row => row.price !== null)) return structuredRows
+
+  return [
+    ...structuredRows,
+    ...rowsMatchingTokens(htmlTextBlocks(markdown), tokens)
+  ].slice(0, MARKDOWN_RECOVERY_ROW_LIMIT)
+}
+
+function rowsMatchingTokens(grids: string[][][], tokens: string[]) {
+  const matches: ReturnType<typeof parsePriceRowsFromGrid> = []
+
+  for (const grid of grids) {
+    const rows = [
       ...parsePriceRowsFromGrid(grid),
       ...visibleRowsMatchingQuestion(grid, tokens)
-    ])
-    .filter(row => {
+    ]
+
+    for (const row of rows) {
       const haystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''}`)
-      return tokens.every(token => haystack.includes(token))
-    })
-    .slice(0, MARKDOWN_RECOVERY_ROW_LIMIT)
+      if (tokens.every(token => haystack.includes(token))) matches.push(row)
+      if (matches.length >= MARKDOWN_RECOVERY_ROW_LIMIT) return matches
+    }
+  }
+
+  return matches
 }
 
 function visibleRowsMatchingQuestion(grid: string[][], tokens: string[]) {
@@ -493,7 +574,7 @@ async function fetchMarkdownRecoveryDocs(
   if (textTokens.length) {
     let tokenQuery = baseQuery()
       .order('created_at', { ascending: false })
-      .limit(MARKDOWN_RECOVERY_DOC_LIMIT)
+      .limit(markdownRecoveryLimit(params, true))
 
     for (const token of textTokens) {
       tokenQuery = tokenQuery.ilike('parsed_markdown', `%${token}%`)
@@ -506,9 +587,17 @@ async function fetchMarkdownRecoveryDocs(
 
   const { data, error } = await baseQuery()
     .order('created_at', { ascending: false })
-    .limit(MARKDOWN_RECOVERY_DOC_LIMIT)
+    .limit(markdownRecoveryLimit(params, false))
   if (error) throw createError({ statusCode: 500, statusMessage: error.message })
   return (data ?? []) as Array<{ id: string; parsed_markdown: string | null }>
+}
+
+function markdownRecoveryLimit(
+  params: { documentId?: string | null; documentIds: string[] },
+  targeted: boolean
+) {
+  if (params.documentId || params.documentIds.length) return MARKDOWN_RECOVERY_SCOPED_DOC_LIMIT
+  return targeted ? MARKDOWN_RECOVERY_TARGETED_DOC_LIMIT : MARKDOWN_RECOVERY_FALLBACK_DOC_LIMIT
 }
 
 async function documentIdsForVendor(client: SupabaseClient, vendorId: string): Promise<string[]> {
