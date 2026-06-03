@@ -1,8 +1,9 @@
 # AI Ratefinder — Plan, Flow & Mockups
 
 > **One-line pitch**
-> A private library of vendor price docs you can chat with. Datalab **Chandra 2**
-> reads the docs, **Google Gemini** answers your questions from them. Ask
+> A private library of vendor price docs you can chat with. Internal parsing,
+> Datalab **Chandra 2**, or **Sarvam Document Intelligence** reads the docs,
+> **Google Gemini** answers your questions from them. Ask
 > "what's the price of Polycab 2.5mm wire?" and get the answer, the MOQ, and
 > the source page — then drop items into a quotation and download it.
 
@@ -11,7 +12,8 @@
 ## 1. What we're building (in 6 bullets)
 
 1. A **Library page** — drop PDFs, images and Excels of vendor price lists.
-   Each one is OCR'd by **Datalab Chandra 2** the moment it's uploaded.
+   Each one is parsed by the admin-selected mode: internal parser, **Datalab
+   Chandra 2**, or **Sarvam Document Intelligence**.
 2. **Gemini cleans the OCR output** — Chandra's markdown is handed to Gemini
    with a strict JSON schema, so we get reliable rows (`product, sku, unit,
    price, moq, currency`) even when tables are messy or footnotes carry the
@@ -61,6 +63,7 @@ down.
         │                                                  │
         │                  ┌──────────────┐                │
         │   sidebar ───▶   │     CHAT     │                │
+        │                  │ blank composer│                │
         │                  └──────┬───────┘                │
         │                         │                        │
         │     user: "price of Polycab 2.5mm wire?"         │
@@ -137,6 +140,11 @@ PDF/Excel preview side-by-side. Edit a row, retag the vendor, delete the doc.
 
 ### 3.2 Chat (the main interaction)
 
+`/chats` always opens a fresh blank composer. Clicking **New chat** should feel
+instant: it navigates to `/chats` and does not create or reuse an empty
+conversation. The chat row is created only after the user sends the first
+message, then the app opens `/chats/:id`.
+
 ```
 ┌────────────────────────────┬──────────────────────────────────────────────────────────┐
 │ AI Ratefinder              │  💬 Wire pricing comparison                              │
@@ -189,12 +197,14 @@ PDF/Excel preview side-by-side. Edit a row, retag the vendor, delete the doc.
 ```
 
 **How a chat message becomes an answer**
-1. The message text is the search query.
-2. Server runs full-text (`tsvector`) + trigram (`pg_trgm`) over every parsed
+1. On `/chats`, the first message creates a new chat row. On `/chats/:id`, the
+   message is appended to that existing thread.
+2. The message text is the search query.
+3. Server runs full-text (`tsvector`) + trigram (`pg_trgm`) over every parsed
    row (`doc_items.raw_name + sku + raw_row`), scoped to the signed-in user,
    and pulls the **top 15** candidate rows along with the **±10 lines of
    surrounding markdown** from each row's source page.
-3. Those candidates + the conversation so far go to **Gemini 2.5 Flash** with
+4. Those candidates + the conversation so far go to **Gemini 2.5 Flash** with
    a strict response schema:
    ```ts
    {
@@ -212,10 +222,10 @@ PDF/Excel preview side-by-side. Edit a row, retag the vendor, delete the doc.
      }>
    }
    ```
-4. The conversational `answer_text` renders above; each `items[i]` becomes a
+5. The conversational `answer_text` renders above; each `items[i]` becomes a
    price card with **"+ Add to quotation"** and **"View source"**.
-5. **"View source"** opens the original PDF zoomed to the right page.
-6. Gemini is constrained to cite only `doc_item_id`s we passed in, so it
+6. **"View source"** opens the original PDF zoomed to the right page.
+7. Gemini is constrained to cite only `doc_item_id`s we passed in, so it
    can't hallucinate a vendor or invent a price.
 
 ### 3.3 Quotation
@@ -268,26 +278,25 @@ PDF/Excel preview side-by-side. Edit a row, retag the vendor, delete the doc.
                           ┌──────────────────────┐
                           │  Nuxt server (Vercel)│
                           │    /api/documents    │
-                          │    /api/chat         │
+                          │    /api/chats        │
                           │    /api/search       │
                           │    /api/quotations   │
                           └──┬─────────┬─────────┬┘
                              │         │         │
-                  ┌──────────▼──┐  ┌───▼──────┐  └─────────────────────┐
-                  │  Supabase   │  │ Chandra 2│                        │
-                  │  Postgres   │  │  OCR     │                        │
-                  │  Auth       │  │ /v1/     │                        │
-                  │  Storage    │  │ convert  │                        │
-                  └─────────────┘  └──────────┘                        │
-                                                                       │
-                                                ┌──────────────────────▼───┐
-                                                │   Google Gemini 2.5      │
-                                                │   • Flash (default)      │
-                                                │   • Pro (hard queries)   │
-                                                │   responseMimeType:      │
-                                                │     application/json     │
-                                                │   responseSchema: …      │
-                                                └──────────────────────────┘
+                  ┌──────────▼──┐  ┌───▼──────────┐  ┌───▼──────────────┐
+                  │  Supabase   │  │ Chandra 2    │  │ Sarvam Document  │
+                  │  Postgres   │  │ OCR extract  │  │ Intelligence OCR │
+                  │  Auth       │  │ /v1/convert  │  │ HTML + JSON ZIP  │
+                  │  Storage    │  └──────┬───────┘  └──────┬───────────┘
+                  └─────────────┘         │                 │
+                                          └────────┬────────┘
+                                                   │
+                                          ┌────────▼─────────┐
+                                          │ Google Gemini 2.5│
+                                          │ Flash (default)  │
+                                          │ Pro (hard query) │
+                                          │ JSON schemas     │
+                                          └──────────────────┘
 ```
 
 **Data model (simpler than before)**

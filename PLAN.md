@@ -15,7 +15,7 @@ scaffold and the Datalab **Chandra 2** OCR API.
 | Auth | **Supabase Auth (email + password)** via `@nuxtjs/supabase` | Custom signup forms, Supabase backend |
 | File storage | **Supabase Storage** | Same vendor as DB + Auth |
 | AI SDK | Vercel AI SDK (`ai`) for streaming UI primitives only | We stream tool-call progress, not LLM tokens |
-| OCR | **Datalab Chandra 2** (`POST /api/v1/convert` + poll) | Required by scope |
+| OCR | Internal parser, **Datalab Chandra 2**, optional **Sarvam Document Intelligence** | Admin-selectable parser modes |
 | LLM | **Google Gemini 2.5 Flash** (Pro for hard queries) via `@google/genai` | Used twice: (a) clean Chandra markdown into structured rows at ingest, (b) RAG answers in the chat with JSON-schema-constrained output and citation-by-doc_item_id |
 | Excel parsing | `exceljs` | Price list + BOQ ingest |
 | PDF/Excel export | `pdfmake` + `exceljs` | Quotation export |
@@ -37,6 +37,26 @@ The hosted API uses an `X-API-Key` header. The flow:
 We will wrap this in a server util `server/utils/chandra.ts` with
 `submitChandra(file, opts)` and `pollChandra(requestCheckUrl, { timeoutMs })`,
 plus a queue-friendly variant for long BOQs.
+
+## Sarvam Document Intelligence — integration notes
+
+Sarvam is available as an admin-selectable parser mode for OCR-heavy documents
+where HTML table preservation is useful.
+
+1. **Create job** — `client.documentIntelligence.createJob({
+   language: "en-IN", outputFormat: "html" })`.
+2. **Upload/start/poll** — upload the source PDF/image/ZIP, start the job and
+   wait for `Completed` or `PartiallyCompleted`.
+3. **Download ZIP** — Sarvam returns a ZIP containing HTML output and companion
+   JSON. The server sanitizes the HTML, stores it as document output and parses
+   HTML tables back into indexed `doc_items`.
+
+Required env var: `SARVAM_API_KEY`.
+Required DB migration: `supabase/migrations/0006_sarvam_parser_settings.sql`.
+
+Supported language values are BCP-47 Indian language codes such as `en-IN`,
+`hi-IN`, `ta-IN`, etc. The Admin page stores this per user as
+`user_settings.sarvam_language`.
 
 ## UI adaptation of the chat template
 
@@ -60,6 +80,19 @@ We will keep the **same shell** and turn each chat into a *workflow thread*:
 The user therefore drives the whole product through a conversational
 interface, while the heavy lifting (OCR, matching, quoting) runs as
 streamed tool calls.
+
+## Chat behavior standard
+
+The Chat route should behave like ChatGPT:
+
+- `/chats` opens a blank composer immediately.
+- Clicking **New chat** navigates to `/chats` without creating or reusing an
+  empty chat row.
+- A new chat row is created only when the first message is submitted.
+- Sidebar/list refreshes happen in the background and must not block route
+  changes or button feedback.
+- Page data fetches should be lazy/non-blocking unless the page cannot render
+  a useful shell without the data.
 
 ## 35-day milestones
 
@@ -162,6 +195,7 @@ ai-ratefinder/
 ```
 DATALAB_API_KEY=...                  # Chandra 2 hosted API
 GEMINI_API_KEY=...                   # Google AI Studio (Gemini 2.5 Flash)
+SARVAM_API_KEY=...                   # Sarvam Document Intelligence
 SUPABASE_URL=...
 SUPABASE_KEY=...                     # anon key (client)
 SUPABASE_SERVICE_ROLE_KEY=...        # server-only, for admin tasks
