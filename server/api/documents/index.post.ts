@@ -3,7 +3,7 @@
  *
  *   multipart/form-data:
  *     file:        the price doc
- *     vendor_name: optional free-text vendor name (auto-created if new)
+ *     vendor_name: required free-text vendor name (auto-created if new)
  *
  * Pipeline: create document → return 202 → storage upload → selected parser → rows.
  * Parser mode is user configurable: auto, internal parser, Chandra OCR, or Sarvam OCR.
@@ -206,25 +206,16 @@ async function downloadStoredFile(storagePath: string) {
 async function resolveVendorId(params: {
   client: Awaited<ReturnType<typeof userClient>>
   ownerId: string
-  filename: string
   vendorName?: string | null
 }) {
   const vendorName = params.vendorName?.trim()
-  if (vendorName) {
-    return await ensureVendorByName({
-      client: params.client,
-      ownerId: params.ownerId,
-      name: vendorName
-    })
+  if (!vendorName) {
+    throw createError({ statusCode: 400, statusMessage: 'Vendor name is required.' })
   }
-
-  const inferredFromFilename = inferVendorName(params.filename, '', [])
-  if (!inferredFromFilename) return null
-
   return await ensureVendorByName({
     client: params.client,
     ownerId: params.ownerId,
-    name: inferredFromFilename
+    name: vendorName
   })
 }
 
@@ -379,6 +370,9 @@ export default defineEventHandler(async (event) => {
     if (!filename || !storagePath || !Number.isFinite(size)) {
       throw createError({ statusCode: 400, statusMessage: 'filename, storage_path, and size are required' })
     }
+    if (!body.vendor_name?.trim()) {
+      throw createError({ statusCode: 400, statusMessage: 'Vendor name is required.' })
+    }
     if (size > MAX_DOCUMENT_UPLOAD_BYTES) {
       throw createError({
         statusCode: 413,
@@ -398,7 +392,6 @@ export default defineEventHandler(async (event) => {
     const vendorId = await resolveVendorId({
       client,
       ownerId: user.id,
-      filename,
       vendorName: body.vendor_name
     })
 
@@ -441,10 +434,12 @@ export default defineEventHandler(async (event) => {
   }
 
   const vendorName = vendorPart?.data?.toString('utf8').trim()
+  if (!vendorName) {
+    throw createError({ statusCode: 400, statusMessage: 'Vendor name is required.' })
+  }
   const vendorId = await resolveVendorId({
     client,
     ownerId: user.id,
-    filename: filePart.filename,
     vendorName
   })
 

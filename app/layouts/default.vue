@@ -97,10 +97,10 @@ onMounted(() => {
 
 const navItems = [
   { to: '/chats', label: 'Chat', icon: 'i-lucide-message-square' },
+  { to: '/dashboard', label: 'Sales', icon: 'i-lucide-chart-column' },
   { to: '/library', label: 'Library', icon: 'i-lucide-library' },
   { to: '/quotations', label: 'Quotations', icon: 'i-lucide-file-text' },
-  { to: '/vendors', label: 'Vendors', icon: 'i-lucide-store' },
-  { to: '/admin', label: 'Admin', icon: 'i-lucide-sliders-horizontal' }
+  { to: '/vendors', label: 'Vendors', icon: 'i-lucide-store' }
 ]
 </script>
 
@@ -110,21 +110,28 @@ const navItems = [
     :class="collapsed ? 'grid-cols-[64px_1fr]' : 'grid-cols-[260px_1fr]'"
   >
     <aside class="flex h-full min-w-0 flex-col border-r border-default bg-muted">
-      <div class="flex items-center justify-between gap-2 px-3 py-3">
-        <NuxtLink v-if="!collapsed" to="/chats" class="flex min-w-0 items-center gap-2 truncate text-sm font-semibold tracking-tight">
-          <span class="grid size-8 shrink-0 place-items-center rounded-lg border border-default bg-default text-highlighted shadow-sm">
-            <UIcon name="i-lucide-search-check" />
-          </span>
-          <span class="truncate">AI Ratefinder</span>
-        </NuxtLink>
-        <UButton
-          :icon="collapsed ? 'i-lucide-panel-right-open' : 'i-lucide-panel-left-close'"
-          size="sm"
-          variant="ghost"
-          class="shrink-0 rounded-lg"
-          :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
-          @click="toggleSidebar"
-        />
+      <div class="px-3 py-3">
+        <div
+          class="flex gap-2"
+          :class="collapsed ? 'flex-col items-center' : 'items-center justify-between'"
+        >
+          <NuxtLink
+            to="/chats"
+            class="flex min-w-0 items-center gap-2 truncate text-sm font-semibold tracking-tight"
+            :aria-label="collapsed ? 'AI Ratefinder home' : undefined"
+          >
+            <BrandLogo size="sm" />
+            <span v-if="!collapsed" class="truncate">AI Ratefinder</span>
+          </NuxtLink>
+          <UButton
+            :icon="collapsed ? 'i-lucide-panel-right-open' : 'i-lucide-panel-left-close'"
+            size="sm"
+            variant="ghost"
+            class="shrink-0 rounded-lg"
+            :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+            @click="toggleSidebar"
+          />
+        </div>
       </div>
 
       <div class="px-2 pb-3">

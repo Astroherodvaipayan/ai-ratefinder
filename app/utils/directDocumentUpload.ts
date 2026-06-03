@@ -73,6 +73,11 @@ function uploadFileToStorage(params: {
 }
 
 export async function uploadDocumentDirect(file: File, options: DirectDocumentUploadOptions = {}) {
+  const vendorName = options.vendorName?.trim()
+  if (!vendorName) {
+    throw new Error('Vendor name is required before uploading documents.')
+  }
+
   const user = useSupabaseUser()
   const supabase = useSupabaseClient()
   const { data } = await supabase.auth.getSession()
@@ -108,7 +113,7 @@ export async function uploadDocumentDirect(file: File, options: DirectDocumentUp
       storage_path: target.storage_path,
       mime: file.type || null,
       size: file.size,
-      vendor_name: options.vendorName?.trim() || undefined
+      vendor_name: vendorName
     }
   })
 

@@ -68,6 +68,7 @@ onMounted(finishConfirm)
 <template>
   <div class="grid min-h-screen place-items-center bg-muted">
     <div class="w-full max-w-sm text-center text-sm text-muted">
+      <BrandLogo size="md" class="mx-auto mb-4" />
       <template v-if="status === 'confirming'">
         <UIcon name="i-lucide-loader-2" class="animate-spin text-2xl text-toned" />
         <p class="mt-2">Confirming your session...</p>

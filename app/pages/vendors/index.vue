@@ -21,6 +21,9 @@ const { data: vendors, refresh: refreshVendors } = useFetch<Vendor[]>('/api/vend
 const { data: docs, refresh: refreshDocs } = useFetch<Doc[]>('/api/documents', { default: () => [], lazy: true })
 
 const name = ref('')
+const deletingId = ref<string | null>(null)
+const uploadOpen = ref(false)
+const uploadVendorName = ref('')
 const iconByVendor = ref<Record<string, string>>({})
 const iconChoices = [
   'i-lucide-folder',
@@ -68,6 +71,37 @@ async function add() {
   void Promise.all([refreshVendors(), refreshDocs()])
 }
 
+async function deleteVendor(folder: { id: string; name: string; docs: Doc[] }) {
+  if (folder.id === 'unassigned' || deletingId.value) return
+
+  const suffix = folder.docs.length
+    ? ` ${folder.docs.length} document${folder.docs.length === 1 ? '' : 's'} will move to Unassigned.`
+    : ''
+  if (!confirm(`Delete "${folder.name}" folder?${suffix}`)) return
+
+  deletingId.value = folder.id
+  try {
+    await $fetch(`/api/vendors/${folder.id}`, { method: 'DELETE' })
+    vendors.value = vendors.value.filter(vendor => vendor.id !== folder.id)
+    const { [folder.id]: _deleted, ...nextIcons } = iconByVendor.value
+    iconByVendor.value = nextIcons
+    saveIcons()
+    await Promise.all([refreshVendors(), refreshDocs()])
+  } finally {
+    deletingId.value = null
+  }
+}
+
+function openVendorUpload(folder: { id: string; name: string }) {
+  if (folder.id === 'unassigned') return
+  uploadVendorName.value = folder.name
+  uploadOpen.value = true
+}
+
+async function onDocumentsUploaded() {
+  await Promise.all([refreshVendors(), refreshDocs()])
+}
+
 onMounted(() => {
   try {
     const saved = JSON.parse(localStorage.getItem('ratefinder:vendor-icons') || '{}')
@@ -113,15 +147,39 @@ onMounted(() => {
               </div>
             </div>
 
-            <UDropdownMenu
-              :items="[iconChoices.map(icon => ({
-                label: icon.replace('i-lucide-', '').replaceAll('-', ' '),
-                icon,
-                onSelect: () => setIcon(folder.id, icon)
-              }))]"
-            >
-              <UButton size="xs" variant="ghost" icon="i-lucide-pencil" class="rounded-md" aria-label="Edit folder icon" />
-            </UDropdownMenu>
+            <div class="flex shrink-0 items-center gap-1">
+              <UButton
+                v-if="folder.id !== 'unassigned'"
+                size="xs"
+                variant="soft"
+                icon="i-lucide-upload"
+                class="rounded-md"
+                aria-label="Upload documents to vendor folder"
+                @click="openVendorUpload(folder)"
+              >
+                Upload
+              </UButton>
+              <UDropdownMenu
+                :items="[iconChoices.map(icon => ({
+                  label: icon.replace('i-lucide-', '').replaceAll('-', ' '),
+                  icon,
+                  onSelect: () => setIcon(folder.id, icon)
+                }))]"
+              >
+                <UButton size="xs" variant="ghost" icon="i-lucide-pencil" class="rounded-md" aria-label="Edit folder icon" />
+              </UDropdownMenu>
+              <UButton
+                v-if="folder.id !== 'unassigned'"
+                size="xs"
+                variant="ghost"
+                color="error"
+                icon="i-lucide-trash-2"
+                class="rounded-md"
+                :loading="deletingId === folder.id"
+                aria-label="Delete vendor folder"
+                @click="deleteVendor(folder)"
+              />
+            </div>
           </div>
 
           <div class="mt-4 space-y-2">
@@ -142,11 +200,28 @@ onMounted(() => {
               v-if="!folder.docs.length"
               class="rounded-lg border border-dashed border-default bg-muted px-3 py-6 text-center text-xs text-muted"
             >
-              Upload a rate list and this folder will fill automatically.
+              <p>Upload a rate list and this folder will fill automatically.</p>
+              <UButton
+                v-if="folder.id !== 'unassigned'"
+                size="xs"
+                variant="soft"
+                icon="i-lucide-upload"
+                class="mt-3 rounded-md"
+                @click="openVendorUpload(folder)"
+              >
+                Upload documents
+              </UButton>
             </div>
           </div>
         </section>
       </div>
     </div>
+
+    <LazyDocumentUploadModal
+      v-model:open="uploadOpen"
+      :initial-vendor-name="uploadVendorName"
+      lock-vendor
+      @uploaded="onDocumentsUploaded"
+    />
   </div>
 </template>

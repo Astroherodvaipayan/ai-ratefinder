@@ -82,8 +82,8 @@ async function destroy() {
   router.push('/quotations')
 }
 
-function download(format: 'pdf' | 'xlsx') {
-  window.open(`/api/quotations/${id.value}/export?format=${format}`, '_blank')
+function exportUrl(format: 'pdf' | 'xlsx') {
+  return `/api/quotations/${id.value}/export?format=${format}`
 }
 
 const formatInr = (n: number | null | undefined) =>
@@ -109,8 +109,22 @@ const formatInr = (n: number | null | undefined) =>
         </UBadge>
       </div>
       <div class="flex items-center gap-2">
-        <UButton size="sm" variant="soft" icon="i-lucide-download" @click="download('pdf')">PDF</UButton>
-        <UButton size="sm" variant="soft" icon="i-lucide-table" @click="download('xlsx')">Excel</UButton>
+        <a
+          :href="exportUrl('pdf')"
+          download
+          class="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accented px-2.5 text-sm font-medium text-highlighted transition hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-highlighted"
+        >
+          <UIcon name="i-lucide-download" />
+          PDF
+        </a>
+        <a
+          :href="exportUrl('xlsx')"
+          download
+          class="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accented px-2.5 text-sm font-medium text-highlighted transition hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-highlighted"
+        >
+          <UIcon name="i-lucide-table" />
+          Excel
+        </a>
         <UButton size="sm" color="error" variant="soft" icon="i-lucide-trash-2" @click="destroy" />
       </div>
     </header>

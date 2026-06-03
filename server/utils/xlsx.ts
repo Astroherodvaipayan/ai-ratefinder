@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs'
+import { brandLogoBuffer } from './brand'
 import { computeTotals } from './totals'
 
 interface QuotationForXlsx {
@@ -21,19 +22,34 @@ interface QuotationForXlsx {
 export async function renderQuotationXlsx(q: QuotationForXlsx): Promise<Buffer> {
   const wb = new ExcelJS.Workbook()
   const ws = wb.addWorksheet('Quotation')
+  const logo = brandLogoBuffer()
 
-  ws.addRow(['Proforma Invoice:', q.title])
-  if (q.customer) ws.addRow(['Customer:', q.customer])
+  ws.columns = [
+    { width: 8 }, { width: 40 }, { width: 16 }, { width: 10 },
+    { width: 16 }, { width: 10 }, { width: 14 }, { width: 14 }
+  ]
+
+  if (logo) {
+    const logoId = wb.addImage({ buffer: logo as any, extension: 'png' })
+    ws.addImage(logoId, {
+      tl: { col: 0, row: 0 },
+      ext: { width: 46, height: 46 }
+    })
+  }
+
+  ws.addRow(['', 'Proforma Invoice'])
+  ws.addRow(['', q.title])
+  if (q.customer) ws.addRow(['', `Customer: ${q.customer}`])
   ws.addRow([])
+
+  ws.getRow(1).height = 36
+  ws.getCell('B1').font = { bold: true, size: 18 }
+  ws.getCell('B2').font = { bold: true, size: 12, color: { argb: 'FF555555' } }
+  if (q.customer) ws.getCell('B3').font = { size: 10, color: { argb: 'FF555555' } }
 
   const header = ws.addRow(['#', 'Description', 'SKU', 'Unit', 'Vendor', 'Qty', 'Rate', 'Amount'])
   header.font = { bold: true }
   header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF4F4F5' } }
-
-  ws.columns = [
-    { width: 5 }, { width: 40 }, { width: 16 }, { width: 10 },
-    { width: 16 }, { width: 10 }, { width: 14 }, { width: 14 }
-  ]
 
   for (const i of q.items) {
     ws.addRow([

@@ -23,7 +23,9 @@ const isDragging = ref(false)
 const uploading = ref(false)
 const uploadError = ref<string | null>(null)
 const reparseError = ref<string | null>(null)
+const vendorEditError = ref<string | null>(null)
 const reparsingIds = ref<string[]>([])
+const savingVendorIds = ref<string[]>([])
 const uploadProgress = ref(0)
 const uploadFilename = ref('')
 const uploadPhase = ref<'idle' | 'uploading' | 'queued'>('idle')
@@ -37,6 +39,7 @@ const uploadLabel = computed(() =>
 const hasProcessingDocs = computed(() =>
   docs.value.some(d => ['uploading', 'ocr', 'extracting'].includes(d.status))
 )
+const trimmedVendorName = computed(() => vendorName.value.trim())
 const groupedDocs = computed(() => {
   const groups = new Map<string, Doc[]>()
   for (const doc of docs.value) {
@@ -89,6 +92,13 @@ async function uploadOneFile(file: File): Promise<void> {
 
 async function uploadFiles(files: FileList | File[]) {
   uploadError.value = null
+  if (!trimmedVendorName.value) {
+    uploadError.value = 'Vendor name is required before uploading documents.'
+    uploadProgress.value = 0
+    uploadPhase.value = 'idle'
+    return
+  }
+
   const selected = Array.from(files)
   const oversized = selected.find(file => file.size > MAX_DOCUMENT_UPLOAD_BYTES)
   if (oversized) {
@@ -138,6 +148,34 @@ async function reparseDocument(doc: Doc) {
   }
 }
 
+async function editDocumentVendor(doc: Doc) {
+  if (savingVendorIds.value.includes(doc.id)) return
+  vendorEditError.value = null
+  const nextName = prompt('Vendor name', doc.vendor?.name ?? '')?.trim()
+  if (nextName === undefined) return
+  if (!nextName) {
+    vendorEditError.value = 'Vendor name is required.'
+    return
+  }
+  if (nextName === doc.vendor?.name) return
+
+  savingVendorIds.value = [...savingVendorIds.value, doc.id]
+  try {
+    const updated = await $fetch<{ id: string; vendor: { id: string; name: string } }>(`/api/documents/${doc.id}`, {
+      method: 'PATCH',
+      body: { vendor_name: nextName }
+    })
+    docs.value = docs.value.map(item =>
+      item.id === doc.id ? { ...item, vendor: updated.vendor } : item
+    )
+    await refresh()
+  } catch (err: any) {
+    vendorEditError.value = err?.statusMessage || err?.message || 'Could not update vendor.'
+  } finally {
+    savingVendorIds.value = savingVendorIds.value.filter(id => id !== doc.id)
+  }
+}
+
 function onPick(e: Event) {
   const input = e.target as HTMLInputElement
   if (input.files?.length) {
@@ -184,10 +222,12 @@ onBeforeUnmount(() => {
       <div class="mx-auto flex max-w-3xl flex-col items-center gap-3 text-center">
         <div class="min-w-0">
           <h1 class="text-base font-semibold">Library</h1>
-          <p class="text-xs text-muted">Drop weekly vendor rate docs up to {{ MAX_DOCUMENT_UPLOAD_LABEL }}. Parsed rows appear automatically.</p>
+          <p class="text-xs text-muted">Drop weekly vendor rate docs up to {{ MAX_DOCUMENT_UPLOAD_LABEL }}. Vendor name is required.</p>
         </div>
         <div class="flex w-full max-w-md flex-col items-center gap-2">
-          <UInput v-model="vendorName" placeholder="Vendor (optional)" size="sm" class="w-full max-w-56" />
+          <UFormField label="Vendor" required :error="uploadError && !trimmedVendorName ? uploadError : undefined" class="w-full max-w-56 text-left">
+            <UInput v-model="vendorName" placeholder="e.g. Acme Cables" size="sm" required />
+          </UFormField>
           <input
             ref="fileInput"
             type="file"
@@ -208,8 +248,8 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <p v-if="uploadError || reparseError" class="border-b border-error bg-error/10 px-6 py-2 text-xs text-error">
-      {{ uploadError || reparseError }}
+    <p v-if="uploadError || reparseError || vendorEditError" class="border-b border-error bg-error/10 px-6 py-2 text-xs text-error">
+      {{ uploadError || reparseError || vendorEditError }}
     </p>
 
     <div class="flex-1 overflow-y-auto px-6 py-4">
@@ -284,6 +324,16 @@ onBeforeUnmount(() => {
                   <UProgress :model-value="statusProgress(d.status)" size="sm" />
                 </div>
                 </NuxtLink>
+                <UButton
+                  size="xs"
+                  variant="soft"
+                  icon="i-lucide-tag"
+                  :loading="savingVendorIds.includes(d.id)"
+                  aria-label="Edit document vendor"
+                  @click="editDocumentVendor(d)"
+                >
+                  Vendor
+                </UButton>
                 <UButton
                   size="xs"
                   variant="soft"

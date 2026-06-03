@@ -3,6 +3,14 @@ import { MAX_DOCUMENT_UPLOAD_LABEL } from '~~/shared/documentUpload'
 
 const open = defineModel<boolean>('open', { default: false })
 
+const props = withDefaults(defineProps<{
+  initialVendorName?: string
+  lockVendor?: boolean
+}>(), {
+  initialVendorName: '',
+  lockVendor: false
+})
+
 const emit = defineEmits<{
   uploaded: []
 }>()
@@ -11,6 +19,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 
 const {
   vendorName,
+  vendorNameError,
   isDragging,
   uploading,
   uploadError,
@@ -36,6 +45,10 @@ watch(uploadPhase, async (phase) => {
 
 const accept = '.pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls'
 
+function applyVendorPreset() {
+  vendorName.value = props.initialVendorName.trim()
+}
+
 function close() {
   if (uploading.value) return
   open.value = false
@@ -47,7 +60,15 @@ function openPicker() {
 }
 
 watch(open, (isOpen) => {
-  if (!isOpen) reset()
+  if (isOpen) {
+    applyVendorPreset()
+  } else {
+    reset()
+  }
+})
+
+watch(() => props.initialVendorName, () => {
+  if (open.value) applyVendorPreset()
 })
 
 function onOverlayKeydown(e: KeyboardEvent) {
@@ -81,7 +102,7 @@ function onOverlayKeydown(e: KeyboardEvent) {
               Upload rate documents
             </h2>
             <p class="mt-1 text-xs text-muted">
-              PDF, images, or Excel up to {{ MAX_DOCUMENT_UPLOAD_LABEL }}. Optional vendor name groups files in your library.
+              PDF, images, or Excel up to {{ MAX_DOCUMENT_UPLOAD_LABEL }}. Vendor name groups files in your library.
             </p>
           </div>
           <UButton
@@ -96,12 +117,13 @@ function onOverlayKeydown(e: KeyboardEvent) {
           />
         </div>
 
-        <UFormField label="Vendor (optional)" class="mb-4">
+        <UFormField label="Vendor" required :error="uploadError && vendorNameError ? uploadError : undefined" class="mb-4">
           <UInput
             v-model="vendorName"
             placeholder="e.g. Acme Cables"
             size="sm"
-            :disabled="uploading"
+            :disabled="uploading || lockVendor"
+            required
           />
         </UFormField>
 

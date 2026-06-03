@@ -1,6 +1,14 @@
 export default defineNuxtConfig({
   compatibilityDate: '2025-01-01',
   future: { compatibilityVersion: 4 },
+  app: {
+    head: {
+      link: [
+        { rel: 'icon', type: 'image/png', href: '/brand/rj-logo.png' },
+        { rel: 'apple-touch-icon', href: '/brand/rj-logo.png' }
+      ]
+    }
+  },
 
   modules: [
     '@nuxt/ui',

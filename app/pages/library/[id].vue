@@ -24,7 +24,9 @@ const fileUrl = ref<string | null>(null)
 const fileMime = ref<string | null>(null)
 const activeView = ref<'source' | 'markdown' | 'rows'>('source')
 const reparsing = ref(false)
+const savingVendor = ref(false)
 const reparseError = ref<string | null>(null)
+const vendorEditError = ref<string | null>(null)
 
 const isImageSource = computed(() => fileMime.value?.startsWith('image/') ?? false)
 const isProcessing = computed(() => doc.value && ['uploading', 'ocr', 'extracting'].includes(doc.value.status))
@@ -65,6 +67,31 @@ async function reparseDocument() {
     reparseError.value = err?.statusMessage || err?.message || 'Reparse failed'
   } finally {
     reparsing.value = false
+  }
+}
+
+async function editDocumentVendor() {
+  if (!doc.value || savingVendor.value) return
+  vendorEditError.value = null
+  const nextName = prompt('Vendor name', doc.value.vendor?.name ?? '')?.trim()
+  if (nextName === undefined) return
+  if (!nextName) {
+    vendorEditError.value = 'Vendor name is required.'
+    return
+  }
+  if (nextName === doc.value.vendor?.name) return
+
+  savingVendor.value = true
+  try {
+    const updated = await $fetch<{ id: string; vendor: { id: string; name: string } }>(`/api/documents/${id.value}`, {
+      method: 'PATCH',
+      body: { vendor_name: nextName }
+    })
+    doc.value = { ...doc.value, vendor: updated.vendor }
+  } catch (err: any) {
+    vendorEditError.value = err?.statusMessage || err?.message || 'Could not update vendor.'
+  } finally {
+    savingVendor.value = false
   }
 }
 
@@ -117,6 +144,15 @@ onBeforeUnmount(() => {
         <UButton
           size="sm"
           variant="soft"
+          icon="i-lucide-tag"
+          :loading="savingVendor"
+          @click="editDocumentVendor"
+        >
+          Edit vendor
+        </UButton>
+        <UButton
+          size="sm"
+          variant="soft"
           icon="i-lucide-refresh-cw"
           :loading="reparsing"
           :disabled="isProcessing"
@@ -130,8 +166,8 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <p v-if="reparseError" class="border-b border-error bg-error/10 px-6 py-2 text-xs text-error">
-      {{ reparseError }}
+    <p v-if="reparseError || vendorEditError" class="border-b border-error bg-error/10 px-6 py-2 text-xs text-error">
+      {{ reparseError || vendorEditError }}
     </p>
 
     <div class="flex flex-1 overflow-hidden">

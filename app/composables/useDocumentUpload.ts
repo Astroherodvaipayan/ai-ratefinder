@@ -14,6 +14,9 @@ export function useDocumentUpload(onComplete?: () => void | Promise<void>) {
   const uploadProgress = ref(0)
   const uploadFilename = ref('')
   const uploadPhase = ref<UploadPhase>('idle')
+  const vendorNameError = computed(() =>
+    vendorName.value.trim() ? null : 'Vendor name is required.'
+  )
 
   const uploadLabel = computed(() =>
     uploadPhase.value === 'uploading'
@@ -38,6 +41,13 @@ export function useDocumentUpload(onComplete?: () => void | Promise<void>) {
 
   async function uploadFiles(files: FileList | File[]) {
     uploadError.value = null
+    if (vendorNameError.value) {
+      uploadError.value = vendorNameError.value
+      uploadProgress.value = 0
+      uploadPhase.value = 'idle'
+      return
+    }
+
     const selected = Array.from(files)
     const oversized = selected.find(file => file.size > MAX_DOCUMENT_UPLOAD_BYTES)
     if (oversized) {
@@ -93,6 +103,7 @@ export function useDocumentUpload(onComplete?: () => void | Promise<void>) {
 
   return {
     vendorName,
+    vendorNameError,
     isDragging,
     uploading,
     uploadError,

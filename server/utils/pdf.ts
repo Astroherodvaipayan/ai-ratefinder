@@ -1,5 +1,6 @@
 import PdfPrinter from 'pdfmake'
 import type { TDocumentDefinitions } from 'pdfmake/interfaces'
+import { brandLogoDataUrl } from './brand'
 import { computeTotals, formatInr } from './totals'
 
 const fonts = {
@@ -32,6 +33,7 @@ interface QuotationForPdf {
 
 export async function renderQuotationPdf(q: QuotationForPdf): Promise<Buffer> {
   const totals = computeTotals(q.items, q)
+  const logo = brandLogoDataUrl()
 
   const body: any[][] = [
     [
@@ -61,9 +63,27 @@ export async function renderQuotationPdf(q: QuotationForPdf): Promise<Buffer> {
     pageMargins: [36, 48, 36, 48],
     defaultStyle: { font: 'Helvetica', fontSize: 9 },
     content: [
-      { text: 'Proforma Invoice', style: 'h1' },
-      { text: q.title, style: 'h2' },
-      q.customer ? { text: `Customer: ${q.customer}`, margin: [0, 0, 0, 12] } : '',
+      {
+        columns: [
+          {
+            width: 54,
+            stack: [
+              logo
+                ? { image: logo, width: 44 }
+                : { text: 'RJ', style: 'logoFallback' }
+            ]
+          },
+          {
+            width: '*',
+            stack: [
+              { text: 'Proforma Invoice', style: 'h1' },
+              { text: q.title, style: 'h2' },
+              q.customer ? { text: `Customer: ${q.customer}`, color: '#555' } : { text: '' }
+            ]
+          }
+        ],
+        margin: [0, 0, 0, 16]
+      },
       {
         table: {
           headerRows: 1,
@@ -97,6 +117,7 @@ export async function renderQuotationPdf(q: QuotationForPdf): Promise<Buffer> {
     styles: {
       h1: { fontSize: 18, bold: true, margin: [0, 0, 0, 4] },
       h2: { fontSize: 12, color: '#555', margin: [0, 0, 0, 12] },
+      logoFallback: { fontSize: 18, bold: true, color: '#333', margin: [0, 4, 0, 0] },
       th: { bold: true, fillColor: '#f4f4f5' }
     }
   }
