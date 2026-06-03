@@ -44,6 +44,11 @@ function matchColumn(headers: string[], syns: string[]): number {
 
 function parseNumber(v: string | undefined): number | null {
   if (!v) return null
+  const original = normaliseCell(v)
+  if (!original) return null
+  if (/^\d+(?:\.\d+)?\s*(?:sq\.?\s*mm|mm|mtrs?\.?|met(?:er|re)s?|pair|core|nos?\.?|pcs?\.?)$/i.test(original)) return null
+  if (/[+]/.test(original) && !/(?:₹|rs\.?|inr)/i.test(original)) return null
+  if (/[a-z]/i.test(original) && !/\b(rs|inr|mrp|rate|each|ea|pc|pcs|nos?|mtrs?|meter|kg|box|coil|roll)\b/i.test(original)) return null
   const cleaned = v
     .replace(/[₹$€,\s]/g, '')
     .replace(/\b(rs|inr|mrp|rate|each|ea|pc|pcs|nos?|mtr|meter|kg|box|coil|roll)\b/gi, '')
@@ -112,6 +117,9 @@ function rowHasEnoughData(row: string[], match: HeaderMatch) {
 }
 
 export function parsePriceRowsFromGrid(rows: string[][], sourcePage: number | null = null): PR[] {
+  const grouped = parseGroupedMatrixTables(rows, sourcePage)
+  if (grouped.length) return grouped
+
   const match = findHeader(rows)
   if (!match) return parseMiniRateTables(rows, sourcePage)
 
@@ -135,7 +143,11 @@ export function parsePriceRowsFromGrid(rows: string[][], sourcePage: number | nu
 }
 
 function normaliseCell(value: string | undefined): string {
-  return value?.replace(/\s+/g, ' ').trim() ?? ''
+  return value
+    ?.replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() ?? ''
 }
 
 function looksLikeSectionTitle(row: string[]): boolean {
@@ -165,6 +177,7 @@ function firstTextColumn(row: string[]): number {
 
 function parseMiniRateTables(rows: string[][], sourcePage: number | null): PR[] {
   const out = [
+    ...parseGroupedMatrixTables(rows, sourcePage),
     ...parseSideBySideMiniRateTables(rows, sourcePage),
     ...parseInlineSectionRateRows(rows, sourcePage)
   ]
@@ -216,6 +229,126 @@ function parseMiniRateTables(rows: string[][], sourcePage: number | null): PR[] 
   }
 
   return dedupeRows(out)
+}
+
+function parseGroupedMatrixTables(rows: string[][], sourcePage: number | null): PR[] {
+  const out: PR[] = []
+
+  for (let titleRowIndex = 0; titleRowIndex < rows.length - 1; titleRowIndex++) {
+    const titleRow = rows[titleRowIndex] ?? []
+    const titleCells = titleRow
+      .map((cell, index) => ({ title: normaliseCell(cell), index }))
+      .filter(({ title }) => looksLikeSectionTitleCell(title))
+    if (!titleCells.length) continue
+
+    const headerRow = rows[titleRowIndex + 1] ?? []
+    const followingRows = rows.slice(titleRowIndex + 2)
+
+    for (let groupIndex = 0; groupIndex < titleCells.length; groupIndex++) {
+      const group = titleCells[groupIndex]!
+      const softStop = titleCells[groupIndex + 1]?.index ?? Math.max(titleRow.length, headerRow.length)
+
+      for (const row of followingRows) {
+        if (row.some(cell => looksLikeSectionTitleCell(cell))) break
+
+        const rowQualifier = firstMatrixQualifier(row, headerRow, group.index)
+        let sawPrice = false
+        let emptyAfterPrice = 0
+
+        for (let col = group.index + 1; col < Math.max(headerRow.length, row.length); col++) {
+          const header = normaliseCell(headerRow[col])
+          const value = normaliseCell(row[col])
+          const price = parseMatrixPrice(value)
+          const variant = matrixVariantLabel(header)
+
+          if (
+            col >= softStop
+            && !(sawPrice && price !== null && variant && looksLikeMatrixContinuation(header))
+          ) {
+            break
+          }
+
+          if (!header && !value) {
+            if (sawPrice && ++emptyAfterPrice >= 2) break
+            continue
+          }
+
+          if (isDescriptorHeader(header)) {
+            if (sawPrice && !value) break
+            continue
+          }
+
+          if (price === null || !variant) {
+            if (sawPrice && !price && !looksLikeMatrixContinuation(header)) break
+            continue
+          }
+
+          sawPrice = true
+          emptyAfterPrice = 0
+          const candidate: PR = {
+            raw_name: [group.title, rowQualifier, variant].filter(Boolean).join(' '),
+            sku: rowQualifier || null,
+            unit: variant,
+            price,
+            moq: null,
+            currency: 'INR',
+            source_page: sourcePage
+          }
+          const parsed = PriceRow.safeParse(candidate)
+          if (parsed.success) out.push(parsed.data)
+        }
+      }
+    }
+  }
+
+  return dedupeRows(out)
+}
+
+function firstMatrixQualifier(row: string[], headerRow: string[], start: number): string {
+  const direct = normaliseCell(row[start])
+  if (direct && parseMatrixPrice(direct) === null) return direct
+
+  for (let col = start + 1; col < Math.min(row.length, start + 4); col++) {
+    const header = normaliseCell(headerRow[col])
+    const value = normaliseCell(row[col])
+    if (!value || parseMatrixPrice(value) !== null) continue
+    if (isDescriptorHeader(header) || looksLikeDimensionOnly(value)) return value
+  }
+
+  return ''
+}
+
+function isDescriptorHeader(value: string | undefined) {
+  const text = normaliseCell(value).toLowerCase()
+  if (!text) return false
+  return /^(size|sizes?|code|model|item|description|rate per coil|rate)$/.test(text)
+}
+
+function looksLikeDimensionOnly(value: string | undefined) {
+  const text = normaliseCell(value)
+  return /^\d+(?:\.\d+)?\s*(?:sq\.?\s*mm|mm|mtrs?\.?|met(?:er|re)s?|pair|core|nos?\.?|pcs?\.?)$/i.test(text)
+}
+
+function matrixVariantLabel(value: string | undefined) {
+  const text = normaliseCell(value)
+  if (!text || isDescriptorHeader(text)) return ''
+  if (/^-+$/.test(text)) return ''
+  return text
+}
+
+function looksLikeMatrixContinuation(value: string | undefined) {
+  const text = normaliseCell(value)
+  return Boolean(text) && (
+    looksLikeRateHeader(text)
+    || /\b(mm|mtrs?\.?|met(?:er|re)s?|pair|core|coil|roll|fr|lsoh|cat|nos?\.?|pcs?\.?)\b/i.test(text)
+    || /^\d+(?:\.\d+)?(?:\+\d+)?$/.test(text)
+  )
+}
+
+function parseMatrixPrice(value: string | undefined) {
+  const text = normaliseCell(value)
+  if (!text || looksLikeDimensionOnly(text)) return null
+  return parseNumber(text)
 }
 
 function parseInlineSectionRateRows(rows: string[][], sourcePage: number | null): PR[] {

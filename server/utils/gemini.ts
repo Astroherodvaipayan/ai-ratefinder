@@ -107,6 +107,8 @@ Style:
 - If the user asks a broad/vague question and candidates span multiple plausible
   vendors or documents, ask which brand/document they want and emit items = [].
 - If a vendor or document scope is provided, answer only within that scope.
+- If candidates are size/length variants of the same requested product family,
+  list the priced variants instead of saying the price is unavailable.
 - Set confidence in [0, 1] reflecting how well the candidate matches the
   user's intent (gauge, brand, length, etc.).
 - If the same product/SKU appears in multiple uploaded documents, prefer the
@@ -201,8 +203,13 @@ export function constrainChatAnswer(answer: ChatAnswer, candidates: CandidateRow
     }
   }
 
+  const saysNoPrice = /\b(?:cannot|can't|could not|unable to|no|not available|unavailable)\b.{0,80}\bprice\b/i
+    .test(answer.answer_text ?? '')
+
   return {
-    answer_text: answer.answer_text || 'I found matching prices in your uploaded rate documents.',
+    answer_text: saysNoPrice
+      ? `I found ${items.length} priced match${items.length === 1 ? '' : 'es'} in your uploaded rate documents.`
+      : answer.answer_text || 'I found matching prices in your uploaded rate documents.',
     items
   }
 }

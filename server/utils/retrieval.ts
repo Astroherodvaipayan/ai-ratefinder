@@ -204,6 +204,7 @@ async function searchRows(
 
   const addHits = (hits: any[], queryIndex: number) => {
     for (const [hitIndex, hit] of hits.entries()) {
+      if (hit.price === null || hit.price === undefined) continue
       if (documentIds && !documentIds.has(hit.document_id)) continue
       const existing = rowsById.get(hit.doc_item_id)
       const rank = queryIndex * 100 + hitIndex
@@ -285,6 +286,7 @@ function shouldRecoverFromMarkdown(
   if (!rows.length) return true
 
   return !rows.some(row => {
+    if (row.price === null || row.price === undefined) return false
     const haystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''}`)
     return tokens.every(token => haystack.includes(token))
   })
@@ -461,7 +463,7 @@ function visibleRowsMatchingQuestion(grid: string[][], tokens: string[]) {
       currency: 'INR',
       source_page: null
     }
-    rows.push(candidate)
+    if (candidate.price !== null) rows.push(candidate)
   }
 
   return rows
@@ -501,6 +503,7 @@ async function recoverMarkdownDocItems(
 
   const rows = docs.flatMap(doc =>
     rowsMatchingQuestion((doc.parsed_markdown as string) ?? '', params.question)
+      .filter(row => row.price !== null)
       .map(row => ({
         owner_id: params.ownerId,
         document_id: doc.id as string,
