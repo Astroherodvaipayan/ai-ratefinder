@@ -237,7 +237,7 @@ function parseInlineSectionRateRows(rows: string[][], sourcePage: number | null)
 }
 
 function parseInlineSectionRateLine(sectionTitle: string, line: string, sourcePage: number | null): PR[] {
-  const itemMatch = normaliseCell(line).match(/^([A-Za-z]*\d[A-Za-z0-9./-]*)\s+(.+)$/)
+  const itemMatch = normaliseCell(line).match(/^([A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|\d[A-Za-z0-9./-]*)\s+(.+)$/)
   if (!itemMatch) return []
 
   const itemKey = itemMatch[1]?.trim() ?? ''

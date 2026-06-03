@@ -65,7 +65,7 @@ export function searchShards(question: string): string[] {
     .map(s => s.trim())
     .filter(s => s.length >= 2)
 
-  const skuLike = question.match(/[A-Za-z]*\d[A-Za-z0-9./-]*|[A-Z]{2,}[A-Z0-9./-]*/g) ?? []
+  const skuLike = question.match(/[A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|[A-Za-z]*\d[A-Za-z0-9./-]*|[A-Z]{2,}[A-Z0-9./-]*/g) ?? []
   const baseTexts = unique([question, ...clauses, ...coAxialVariants(question)])
   const punctuationVariants = baseTexts
     .flatMap(text => [
@@ -270,7 +270,7 @@ function markdownLineBlocks(markdown: string): string[][][] {
     for (let j = i + 1; j < lines.length; j++) {
       const row = lines[j] ?? ''
       if (/\b(cables?|wires?|lan|speaker|telephone|cctv)\b/i.test(row) && j > i + 1) break
-      if (!/^[A-Za-z]*\d[A-Za-z0-9./-]*\s+/.test(row)) {
+      if (!/^(?:[A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|\d[A-Za-z0-9./-]*)\s+/.test(row)) {
         if (inlineBlock.length > 1) break
         continue
       }

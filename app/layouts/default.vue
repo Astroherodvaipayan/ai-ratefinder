@@ -94,7 +94,8 @@ function togglePin(chat: Chat) {
 
 async function deleteChat(chat: Chat) {
   if (!confirm(`Delete "${chat.title}"?`)) return
-  await $fetch(`/api/chats/${chat.id}`, { method: 'DELETE' })
+  const deleteUrl = `/api/chats/${chat.id}` as string
+  await $fetch(deleteUrl, { method: 'DELETE' })
   pinnedIds.value = pinnedIds.value.filter(id => id !== chat.id)
   persistPins()
   await refreshChats()
