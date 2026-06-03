@@ -6,6 +6,7 @@
  * lists, and emits PriceRow records that survive a Zod check.
  */
 import { PriceRow, type PriceRow as PR } from '~~/shared/schemas'
+import { parsePriceRowsFromGrid } from './internalPriceParser'
 
 interface MdTable { header: string[]; rows: string[][] }
 
@@ -57,7 +58,7 @@ function parseMarkdownTables(markdown: string): MdTable[] {
         rows.push(splitRow(rowLine))
         i++
       }
-      if (header.length >= 2 && rows.length > 0) tables.push({ header, rows })
+      if (header.length >= 1 && rows.length > 0) tables.push({ header, rows })
     } else {
       i++
     }
@@ -76,6 +77,12 @@ function parseNumber(v: string | undefined): number | null {
 export function extractPriceRows(markdown: string): PR[] {
   const out: PR[] = []
   for (const t of parseMarkdownTables(markdown)) {
+    const gridRows = parsePriceRowsFromGrid([t.header, ...t.rows])
+    if (gridRows.length) {
+      out.push(...gridRows)
+      continue
+    }
+
     const nameIdx  = matchColumn(t.header, NAME_SYNS)
     const skuIdx   = matchColumn(t.header, SKU_SYNS)
     const unitIdx  = matchColumn(t.header, UNIT_SYNS)

@@ -10,6 +10,8 @@ const password = ref('')
 const error = ref<string | null>(null)
 const loading = ref(false)
 
+interface LandingChat { id: string }
+
 function redirectTarget() {
   const redirect = route.query.redirect
   return typeof redirect === 'string' && redirect.startsWith('/')
@@ -17,9 +19,21 @@ function redirectTarget() {
     : '/chats'
 }
 
+async function postLoginTarget() {
+  const target = redirectTarget()
+  if (target !== '/chats') return target
+
+  try {
+    const chat = await $fetch<LandingChat>('/api/chats/landing')
+    return chat.id ? `/chats/${chat.id}` : target
+  } catch {
+    return target
+  }
+}
+
 onMounted(async () => {
   if (await hasAuthSession(supabase)) {
-    navigateAfterAuth(redirectTarget())
+    navigateAfterAuth(await postLoginTarget())
   }
 })
 
@@ -27,7 +41,7 @@ async function submit() {
   loading.value = true
   error.value = null
   try {
-    const { error: err } = await supabase.auth.signInWithPassword({
+    const { data, error: err } = await supabase.auth.signInWithPassword({
       email: email.value,
       password: password.value
     })
@@ -36,8 +50,8 @@ async function submit() {
       return
     }
 
-    await waitForAuthSession(supabase)
-    navigateAfterAuth(redirectTarget())
+    await waitForAuthSession(supabase, 4_000, data.session)
+    navigateAfterAuth(await postLoginTarget())
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : 'Could not sign in. Please try again.'
   } finally {
