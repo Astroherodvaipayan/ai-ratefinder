@@ -12,6 +12,15 @@ const CONTEXT_RADIUS = 10  // lines on either side of the matched row
 const MAX_SEARCH_SHARDS = 10
 const MARKDOWN_RECOVERY_DOC_LIMIT = 20
 const MARKDOWN_RECOVERY_ROW_LIMIT = 80
+const NORMALIZED_FALLBACK_ROW_LIMIT = 500
+
+type RetrievedRow = {
+  doc_item_id: string; document_id: string; raw_name: string;
+  sku: string | null; unit: string | null; price: number | null;
+  moq: string | null; currency: string; source_page: number | null;
+  filename: string; vendor: string; source_uploaded_at?: string | null;
+  score?: number; rank: number
+}
 
 export interface RetrievalFilters {
   documentId?: string | null
@@ -34,17 +43,35 @@ function unique<T>(items: T[]): T[] {
   return [...new Set(items)]
 }
 
-function searchShards(question: string): string[] {
+function coAxialVariants(text: string): string[] {
+  const variants = new Set<string>()
+  const replacements = [
+    text.replace(/\bc[o0]\s*[-_/ ]\s*axial\b/gi, 'coaxial'),
+    text.replace(/\bc[o0]\s*[-_/ ]\s*axial\b/gi, 'co axial'),
+    text.replace(/\bc[o0]\s*[-_/ ]\s*axial\b/gi, 'co-axial'),
+    text.replace(/\bcoaxial\b/gi, 'co axial'),
+    text.replace(/\bcoaxial\b/gi, 'co-axial')
+  ]
+  for (const replacement of replacements) {
+    const normalized = replacement.replace(/\s+/g, ' ').trim()
+    if (normalized && normalized !== text.trim()) variants.add(normalized)
+  }
+  return [...variants]
+}
+
+export function searchShards(question: string): string[] {
   const clauses = question
     .split(/\n|,|;|\band\b|&|\+/i)
     .map(s => s.trim())
     .filter(s => s.length >= 2)
 
-  const skuLike = question.match(/[A-Za-z]*\d[A-Za-z0-9./-]*|[A-Z]{2,}[A-Z0-9./-]*/g) ?? []
-  const punctuationVariants = [question, ...clauses]
+  const skuLike = question.match(/[A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|[A-Za-z]*\d[A-Za-z0-9./-]*|[A-Z]{2,}[A-Z0-9./-]*/g) ?? []
+  const baseTexts = unique([question, ...clauses, ...coAxialVariants(question)])
+  const punctuationVariants = baseTexts
     .flatMap(text => [
       text.replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ').trim(),
-      text.replace(/[-_/\s]+/g, '').trim()
+      text.replace(/[-_/\s]+/g, '').trim(),
+      ...coAxialVariants(text)
     ])
     .filter(text => text.length >= 2)
 
@@ -71,13 +98,7 @@ export async function retrieveCandidates(
   ])
   const hasScope = Boolean(filters.documentId || filters.vendorId)
 
-  const rowsById = new Map<string, {
-    doc_item_id: string; document_id: string; raw_name: string;
-    sku: string | null; unit: string | null; price: number | null;
-    moq: string | null; currency: string; source_page: number | null;
-    filename: string; vendor: string; source_uploaded_at?: string | null;
-    score?: number; rank: number
-  }>()
+  const rowsById = new Map<string, RetrievedRow>()
 
   for (const [queryIndex, shard] of searchShards(question).entries()) {
     const { data: hits, error } = await client.rpc('rf_search_items', {
@@ -99,11 +120,14 @@ export async function retrieveCandidates(
     .sort((a, b) => a.rank - b.rank)
     .slice(0, limit)
 
-  if (!rows.length && hasScope) {
-    rows = await retrieveScopedFallback(client, question, limit, {
+  if (shouldRecoverFromMarkdown(question, rows)) {
+    const fallbackRows = await retrieveNormalizedFallback(client, question, limit, {
       documentId: filters.documentId,
       documentIds: [...allowedDocumentIds]
     })
+    if (fallbackRows.length) {
+      rows = mergeRowsByPriority([...fallbackRows, ...rows]).slice(0, limit)
+    }
   }
 
   if (
@@ -225,21 +249,34 @@ function markdownLineBlocks(markdown: string): string[][][] {
   const lines = markdown.split('\n').map(line => line.trim()).filter(Boolean)
   const blocks: string[][][] = []
 
-  for (let i = 0; i < lines.length - 2; i++) {
+  for (let i = 0; i < lines.length - 1; i++) {
     const title = lines[i] ?? ''
     if (!/\b(cables?|wires?|lan|speaker|telephone|cctv)\b/i.test(title)) continue
     const header = lines[i + 1] ?? ''
-    if (!/\b(size|sku|model|code)\b/i.test(header) || !/\b(rate|mtrs?|meters?|coil|pair)\b/i.test(header)) continue
 
-    const block: string[][] = [[title], header.split(/\s{2,}|\t/).map(cell => cell.trim()).filter(Boolean)]
-    for (let j = i + 2; j < lines.length; j++) {
-      const row = lines[j] ?? ''
-      if (/\b(cables?|wires?|lan|speaker|telephone|cctv)\b/i.test(row) && j > i + 2) break
-      const cells = row.split(/\s{2,}|\t/).map(cell => cell.trim()).filter(Boolean)
-      if (cells.length < 2) break
-      block.push(cells)
+    if (/\b(size|sku|model|code)\b/i.test(header) && /\b(rate|mtrs?|meters?|coil|pair)\b/i.test(header)) {
+      const block: string[][] = [[title], header.split(/\s{2,}|\t/).map(cell => cell.trim()).filter(Boolean)]
+      for (let j = i + 2; j < lines.length; j++) {
+        const row = lines[j] ?? ''
+        if (/\b(cables?|wires?|lan|speaker|telephone|cctv)\b/i.test(row) && j > i + 2) break
+        const cells = row.split(/\s{2,}|\t/).map(cell => cell.trim()).filter(Boolean)
+        if (cells.length < 2) break
+        block.push(cells)
+      }
+      if (block.length > 2) blocks.push(block)
     }
-    if (block.length > 2) blocks.push(block)
+
+    const inlineBlock: string[][] = [[title]]
+    for (let j = i + 1; j < lines.length; j++) {
+      const row = lines[j] ?? ''
+      if (/\b(cables?|wires?|lan|speaker|telephone|cctv)\b/i.test(row) && j > i + 1) break
+      if (!/^(?:[A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|\d[A-Za-z0-9./-]*)\s+/.test(row)) {
+        if (inlineBlock.length > 1) break
+        continue
+      }
+      inlineBlock.push([row])
+    }
+    if (inlineBlock.length > 1) blocks.push(inlineBlock)
   }
 
   return blocks
@@ -343,20 +380,45 @@ async function documentIdsForVendor(client: SupabaseClient, vendorId: string): P
   return (data ?? []).map(d => d.id as string)
 }
 
-function scoreScopedRow(row: { raw_name: string; sku: string | null }, shards: string[]) {
-  const name = row.raw_name.toLowerCase()
-  const sku = (row.sku ?? '').toLowerCase()
-  return shards.reduce((score, shard) => {
-    const q = shard.toLowerCase()
-    if (!q) return score
-    if (sku === q) return score + 8
-    if (sku.includes(q)) return score + 5
-    if (name.includes(q)) return score + 3
-    return score
-  }, 0)
+function mergeRowsByPriority(rows: RetrievedRow[]) {
+  const merged = new Map<string, RetrievedRow>()
+  for (const [index, row] of rows.entries()) {
+    const existing = merged.get(row.doc_item_id)
+    const rank = index
+    if (!existing || rank < existing.rank) {
+      merged.set(row.doc_item_id, { ...row, rank })
+    }
+  }
+  return [...merged.values()].sort((a, b) =>
+    (b.score ?? 0) - (a.score ?? 0) || a.rank - b.rank
+  )
 }
 
-async function retrieveScopedFallback(
+function scoreRow(row: { raw_name: string; sku: string | null; unit?: string | null }, question: string) {
+  const shards = searchShards(question)
+  const tokens = queryIntentTokens(question)
+  const name = normaliseSearchText(row.raw_name)
+  const sku = normaliseSearchText(row.sku ?? '')
+  const unit = normaliseSearchText(row.unit ?? '')
+  const compactHaystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''}`)
+  let score = tokens.length && tokens.every(token => compactHaystack.includes(token)) ? 10 : 0
+
+  for (const shard of shards) {
+    const q = normaliseSearchText(shard)
+    const compact = compactSearchText(shard)
+    if (!q && !compact) continue
+
+    if (sku && sku === q) score += 12
+    if (sku && (sku.includes(q) || compactSearchText(row.sku ?? '').includes(compact))) score += 6
+    if (name.includes(q)) score += 4
+    if (compact && compactHaystack.includes(compact)) score += 5
+    if (unit.includes(q)) score += 1
+  }
+
+  return score
+}
+
+async function retrieveNormalizedFallback(
   client: SupabaseClient,
   question: string,
   limit: number,
@@ -369,7 +431,8 @@ async function retrieveScopedFallback(
       documents:document_id(filename, created_at, vendor:vendor_id(name))
     `)
     .not('price', 'is', null)
-    .limit(200)
+    .order('created_at', { ascending: false })
+    .limit(NORMALIZED_FALLBACK_ROW_LIMIT)
 
   if (scope.documentId) {
     query = query.eq('document_id', scope.documentId)
@@ -380,7 +443,6 @@ async function retrieveScopedFallback(
   const { data, error } = await query
   if (error) throw createError({ statusCode: 500, statusMessage: error.message })
 
-  const shards = searchShards(question)
   return ((data ?? []) as any[])
     .map((row, index) => ({
       doc_item_id: row.id,
@@ -396,9 +458,9 @@ async function retrieveScopedFallback(
       vendor: row.documents?.vendor?.name ?? 'Unknown',
       source_uploaded_at: row.documents?.created_at ?? null,
       rank: index,
-      score: scoreScopedRow(row, shards)
+      score: scoreRow(row, question)
     }))
-    .filter(row => row.score > 0 || Boolean(scope.documentId))
+    .filter(row => row.score > 0)
     .sort((a, b) => b.score - a.score || a.rank - b.rank)
     .slice(0, limit)
 }

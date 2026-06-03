@@ -31,7 +31,7 @@ export const PRICE_ROW_SCHEMA = {
         properties: {
           raw_name: {
             type: 'string',
-            description: 'Full product description including the nearby section/table title, brand/series/variant, size, grade, cable type, and rate basis when relevant. For compact tables such as "RATNA CO-AXIAL CABLES" with row "RG-6F" and rate columns "90 MTRS." / "305 MTRS.", emit separate rows like "RATNA CO-AXIAL CABLES RG-6F 90 MTRS." and "RATNA CO-AXIAL CABLES RG-6F 305 MTRS.".'
+            description: 'Full product description including the nearby section/table title, brand/series/variant, size, grade, cable type, and rate basis when relevant. Preserve cable section titles even when OCR varies spacing or punctuation, such as "RATNA CO-AXIAL CABLES", "RATNA CO AXIAL CABLES", or "RATNA COAXIAL CABLES". For compact matrix or inline rate tables with row "RG-6F" and rate columns/cells "90 MTRS." / "305 MTRS.", emit separate rows like "RATNA CO-AXIAL CABLES RG-6F 90 MTRS." and "RATNA CO-AXIAL CABLES RG-6F 305 MTRS.".'
           },
           sku: {
             type: ['string', 'null'],
