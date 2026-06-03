@@ -1,5 +1,5 @@
-export const MAX_DOCUMENT_UPLOAD_BYTES = 100 * 1024 * 1024
-export const MAX_DOCUMENT_UPLOAD_LABEL = '100MB'
+export const MAX_DOCUMENT_UPLOAD_BYTES = 50 * 1024 * 1024
+export const MAX_DOCUMENT_UPLOAD_LABEL = '50MB'
 
 export function formatDocumentUploadBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0B'

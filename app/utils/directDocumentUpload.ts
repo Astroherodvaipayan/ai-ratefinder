@@ -53,7 +53,7 @@ function getStorageUploadErrorMessage(message: string, file: File) {
     || normalizedMessage.includes('exceeded the maximum')
     || normalizedMessage.includes('file size')
   ) {
-    return `Supabase rejected ${file.name} (${sizeLabel}) because the project's global Storage file size limit is below this file. The app bucket is configured for ${MAX_DOCUMENT_UPLOAD_LABEL}, but Supabase's global limit takes precedence. Free projects are capped at 50MB; on Pro or higher, set Storage Settings > Global file size limit to ${MAX_DOCUMENT_UPLOAD_LABEL}.`
+    return `Supabase rejected ${file.name} (${sizeLabel}) because the project's global Storage file size limit is below this file. The app bucket is configured for ${MAX_DOCUMENT_UPLOAD_LABEL}, but Supabase's global limit takes precedence. Free projects are capped at 50MB; set Storage Settings > Global file size limit to ${MAX_DOCUMENT_UPLOAD_LABEL}.`
   }
 
   return `Storage rejected ${file.name} (${sizeLabel}): ${cleanedMessage}. App limit is ${MAX_DOCUMENT_UPLOAD_LABEL}; if this repeats, check the Supabase project/global storage upload limit.`
