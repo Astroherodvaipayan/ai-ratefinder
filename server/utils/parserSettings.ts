@@ -38,6 +38,12 @@ export function isSarvamLanguage(value: unknown): value is SarvamLanguage {
   return typeof value === 'string' && SARVAM_LANGUAGES.includes(value as SarvamLanguage)
 }
 
+function isMissingSarvamLanguageColumnError(error: { message?: string; details?: string; hint?: string; code?: string } | null | undefined) {
+  const text = `${error?.message ?? ''} ${error?.details ?? ''} ${error?.hint ?? ''}`.toLowerCase()
+  return text.includes('sarvam_language')
+    || (error?.code === 'PGRST204' && text.includes('user_settings'))
+}
+
 export async function getParserSettings(client: SupabaseClient, ownerId: string): Promise<{
   parser_mode: ParserMode
   sarvam_language: SarvamLanguage
@@ -49,7 +55,7 @@ export async function getParserSettings(client: SupabaseClient, ownerId: string)
     .maybeSingle()
 
   if (error) {
-    if (error.message.includes('sarvam_language')) {
+    if (isMissingSarvamLanguageColumnError(error)) {
       const fallback = await getParserMode(client, ownerId)
       return { parser_mode: fallback, sarvam_language: 'en-IN' }
     }
@@ -78,6 +84,24 @@ export async function getParserMode(client: SupabaseClient, ownerId: string): Pr
   return isParserMode(data?.parser_mode) ? data.parser_mode : 'auto'
 }
 
+async function setParserModeOnly(
+  client: SupabaseClient,
+  ownerId: string,
+  parserMode: ParserMode
+) {
+  const { error } = await client
+    .from('user_settings')
+    .upsert({
+      owner_id: ownerId,
+      parser_mode: parserMode,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'owner_id' })
+
+  if (error) {
+    throw createError({ statusCode: 500, statusMessage: error.message })
+  }
+}
+
 export async function setParserSettings(
   client: SupabaseClient,
   ownerId: string,
@@ -100,6 +124,10 @@ export async function setParserSettings(
     }, { onConflict: 'owner_id' })
 
   if (error) {
+    if (isMissingSarvamLanguageColumnError(error)) {
+      await setParserModeOnly(client, ownerId, settings.parser_mode)
+      return { parser_mode: settings.parser_mode, sarvam_language: 'en-IN' }
+    }
     throw createError({ statusCode: 500, statusMessage: error.message })
   }
 
