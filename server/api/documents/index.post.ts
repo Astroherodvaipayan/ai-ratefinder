@@ -14,6 +14,7 @@ import { getParserSettings } from '../../utils/parserSettings'
 import { runChandraPriceExtraction, type ExtractedPriceRow } from '../../utils/priceExtraction'
 import { runSarvamPriceExtraction } from '../../utils/sarvam'
 import { adminClient } from '../../utils/supabase'
+import { ensureUploadBucketLimit } from '../../utils/uploadBucket'
 import {
   MAX_DOCUMENT_UPLOAD_BYTES,
   documentUploadSizeError
@@ -239,12 +240,13 @@ export async function processUploadedDocument(params: {
 
     const storageUpload = params.storageAlreadyUploaded
       ? Promise.resolve()
-      : client.storage
-        .from('uploads')
-        .upload(params.storagePath, fileData, {
-          contentType,
-          upsert: false
-        })
+      : ensureUploadBucketLimit()
+        .then(() => client.storage
+          .from('uploads')
+          .upload(params.storagePath, fileData, {
+            contentType,
+            upsert: false
+          }))
         .then(({ error }) => {
           if (error) {
             throw createError({ statusCode: 500, statusMessage: error.message })
@@ -257,6 +259,7 @@ export async function processUploadedDocument(params: {
     let markdown = ''
     let pageCount: number | null = null
     let rows: ExtractedPriceRow[] = []
+    const parserWarnings: string[] = []
 
     if (parserMode !== 'chandra' && parserMode !== 'sarvam') {
       await client.from('documents').update({
@@ -264,23 +267,27 @@ export async function processUploadedDocument(params: {
         updated_at: new Date().toISOString()
       }).eq('id', params.doc.id)
 
-      const internal = await parseInternalPriceDocument({
-        fileData,
-        filename: params.filename,
-        mime: params.mime
-      })
-      if (internal.rows.length > 0 || parserMode === 'internal') {
-        markdown = internal.markdown
-        pageCount = internal.pageCount
-        rows = internal.rows.map(row => ({
-          raw_name: row.raw_name,
-          sku: row.sku,
-          unit: row.unit,
-          price: row.price,
-          moq: row.moq,
-          currency: row.currency,
-          source_page: row.source_page ?? null
-        }))
+      try {
+        const internal = await parseInternalPriceDocument({
+          fileData,
+          filename: params.filename,
+          mime: params.mime
+        })
+        if (internal.rows.length > 0 || parserMode === 'internal') {
+          markdown = internal.markdown
+          pageCount = internal.pageCount
+          rows = internal.rows.map(row => ({
+            raw_name: row.raw_name,
+            sku: row.sku,
+            unit: row.unit,
+            price: row.price,
+            moq: row.moq,
+            currency: row.currency,
+            source_page: row.source_page ?? null
+          }))
+        }
+      } catch (err: any) {
+        parserWarnings.push(`Internal parser failed; falling back to OCR. ${err?.statusMessage || err?.message || ''}`.trim())
       }
     }
 
@@ -290,19 +297,26 @@ export async function processUploadedDocument(params: {
         updated_at: new Date().toISOString()
       }).eq('id', params.doc.id)
 
-      const sarvam = await runSarvamPriceExtraction({
-        fileData,
-        filename: params.filename,
-        mime: params.mime,
-        language: parserSettings.sarvam_language
-      })
-      requestId = `sarvam:${sarvam.requestId}`
-      markdown = sarvam.markdown
-      pageCount = sarvam.pageCount
-      rows = sarvam.rows
+      try {
+        const sarvam = await runSarvamPriceExtraction({
+          fileData,
+          filename: params.filename,
+          mime: params.mime,
+          language: parserSettings.sarvam_language
+        })
+        requestId = `sarvam:${sarvam.requestId}`
+        markdown = sarvam.markdown
+        pageCount = sarvam.pageCount
+        rows = sarvam.rows
+      } catch (err: any) {
+        parserWarnings.push(`Sarvam parser failed; falling back to Chandra. ${err?.statusMessage || err?.message || ''}`.trim())
+      }
     }
 
-    if (parserMode === 'chandra' || ((parserMode === 'auto' || parserMode === 'internal') && !hasUsableRows(rows))) {
+    if (
+      parserMode === 'chandra'
+      || ((parserMode === 'auto' || parserMode === 'internal' || parserMode === 'sarvam') && !hasUsableRows(rows))
+    ) {
       await client.from('documents').update({
         status: 'ocr',
         updated_at: new Date().toISOString()
@@ -318,6 +332,8 @@ export async function processUploadedDocument(params: {
       pageCount = chandra.pageCount
       rows = chandra.rows
     }
+
+    for (const warning of parserWarnings) console.warn(warning)
 
     await storageUpload
 

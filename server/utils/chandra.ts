@@ -7,6 +7,8 @@
  *   3. Result carries markdown / json / pages / images / metadata.
  */
 
+const DEFAULT_POLL_TIMEOUT_MS = 20 * 60_000
+
 const CONVERT_ENDPOINT = 'https://www.datalab.to/api/v1/convert'
 const EXTRACT_ENDPOINT = 'https://www.datalab.to/api/v1/extract'
 
@@ -119,7 +121,7 @@ export async function submitChandra(
 
 export async function pollChandra(
   checkUrl: string,
-  { timeoutMs = 5 * 60_000, intervalMs = 2000 }: { timeoutMs?: number; intervalMs?: number } = {}
+  { timeoutMs = DEFAULT_POLL_TIMEOUT_MS, intervalMs = 2000 }: { timeoutMs?: number; intervalMs?: number } = {}
 ): Promise<ChandraResult> {
   const deadline = Date.now() + timeoutMs
   let delay = intervalMs
