@@ -163,9 +163,11 @@ function compactSearchText(text: string) {
 
 function queryIntentTokens(question: string) {
   const stop = new Set([
-    'available', 'cable', 'cables', 'document', 'documents', 'find', 'for',
-    'from', 'listing', 'listings', 'price', 'prices', 'provided', 'rate',
-    'rates', 'the', 'with'
+    'about', 'all', 'any', 'are', 'available', 'cable', 'cables', 'can', 'could',
+    'document', 'documents', 'find', 'for', 'from', 'give', 'have', 'how', 'is',
+    'listing', 'listings', 'much', 'please', 'price', 'prices', 'provided', 'rate',
+    'rates', 'show', 'tell', 'the', 'there', 'these', 'this', 'what', 'when', 'where',
+    'which', 'with', 'would', 'you', 'your'
   ])
   return unique(normaliseSearchText(question)
     .split(' ')
@@ -210,7 +212,8 @@ function markdownTables(markdown: string): string[][][] {
   }
 
   for (const line of lines) {
-    if (line.includes('|') && !isSeparatorRow(line)) {
+    if (isSeparatorRow(line)) continue
+    if (line.includes('|')) {
       current.push(splitMarkdownRow(line))
     } else {
       flush()
