@@ -28,6 +28,7 @@ const reparseError = ref<string | null>(null)
 const isImageSource = computed(() => fileMime.value?.startsWith('image/') ?? false)
 const isProcessing = computed(() => doc.value && ['uploading', 'ocr', 'extracting'].includes(doc.value.status))
 const markdownText = computed(() => doc.value?.parsed_markdown?.trim() || '')
+const parsedOutputIsHtml = computed(() => /<\/?(table|html|body|thead|tbody|tr|td|th|p|div|h[1-6])[\s>]/i.test(markdownText.value))
 
 async function loadSource() {
   if (fileUrl.value) return
@@ -149,7 +150,7 @@ onBeforeUnmount(() => {
             icon="i-lucide-file-code"
             @click="activeView = 'markdown'"
           >
-            Document markdown
+            Document output
           </UButton>
           <UButton
             size="sm"
@@ -181,16 +182,21 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else-if="activeView === 'markdown'" class="h-full overflow-y-auto px-6 py-4">
+            <div
+              v-if="markdownText && parsedOutputIsHtml"
+              class="parsed-html rounded-lg border border-default bg-default p-4 text-sm"
+              v-html="markdownText"
+            />
             <pre
-              v-if="markdownText"
+              v-else-if="markdownText"
               class="whitespace-pre-wrap rounded-lg border border-default bg-elevated p-4 text-xs leading-5"
             >{{ markdownText }}</pre>
             <div v-else class="mt-10 text-sm text-muted">
               <p v-if="isProcessing">
-                Reading is still running. This view will fill with markdown as soon as it is saved.
+                Reading is still running. This view will fill as soon as output is saved.
               </p>
               <p v-else>
-                No markdown was saved for this document.
+                No parser output was saved for this document.
               </p>
             </div>
           </div>
@@ -227,3 +233,33 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.parsed-html :deep(table) {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+}
+
+.parsed-html :deep(th),
+.parsed-html :deep(td) {
+  border: 1px solid var(--ui-border);
+  padding: 0.5rem 0.625rem;
+  vertical-align: top;
+}
+
+.parsed-html :deep(th) {
+  background: var(--ui-bg-elevated);
+  font-weight: 600;
+}
+
+.parsed-html :deep(p),
+.parsed-html :deep(h1),
+.parsed-html :deep(h2),
+.parsed-html :deep(h3),
+.parsed-html :deep(h4),
+.parsed-html :deep(h5),
+.parsed-html :deep(h6) {
+  margin-bottom: 0.75rem;
+}
+</style>

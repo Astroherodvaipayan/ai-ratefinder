@@ -6,12 +6,13 @@
  *     vendor_name: optional free-text vendor name (auto-created if new)
  *
  * Pipeline: create document → return 202 → storage upload → selected parser → rows.
- * Parser mode is user configurable: auto, internal parser, or Chandra OCR.
+ * Parser mode is user configurable: auto, internal parser, Chandra OCR, or Sarvam OCR.
  */
 import { randomUUID } from 'node:crypto'
 import { parseInternalPriceDocument } from '../../utils/internalPriceParser'
-import { getParserMode } from '../../utils/parserSettings'
+import { getParserSettings } from '../../utils/parserSettings'
 import { runChandraPriceExtraction, type ExtractedPriceRow } from '../../utils/priceExtraction'
+import { runSarvamPriceExtraction } from '../../utils/sarvam'
 import { adminClient } from '../../utils/supabase'
 import {
   MAX_DOCUMENT_UPLOAD_BYTES,
@@ -259,13 +260,14 @@ export async function processUploadedDocument(params: {
           }
         })
 
-    const parserMode = await getParserMode(client, params.doc.owner_id)
+    const parserSettings = await getParserSettings(client, params.doc.owner_id)
+    const parserMode = parserSettings.parser_mode
     let requestId: string | null = null
     let markdown = ''
     let pageCount: number | null = null
     let rows: ExtractedPriceRow[] = []
 
-    if (parserMode !== 'chandra') {
+    if (parserMode !== 'chandra' && parserMode !== 'sarvam') {
       await client.from('documents').update({
         status: 'extracting',
         updated_at: new Date().toISOString()
@@ -289,6 +291,24 @@ export async function processUploadedDocument(params: {
           source_page: row.source_page ?? null
         }))
       }
+    }
+
+    if (parserMode === 'sarvam') {
+      await client.from('documents').update({
+        status: 'ocr',
+        updated_at: new Date().toISOString()
+      }).eq('id', params.doc.id)
+
+      const sarvam = await runSarvamPriceExtraction({
+        fileData,
+        filename: params.filename,
+        mime: params.mime,
+        language: parserSettings.sarvam_language
+      })
+      requestId = `sarvam:${sarvam.requestId}`
+      markdown = sarvam.markdown
+      pageCount = sarvam.pageCount
+      rows = sarvam.rows
     }
 
     if (parserMode === 'chandra' || ((parserMode === 'auto' || parserMode === 'internal') && !hasUsableRows(rows))) {

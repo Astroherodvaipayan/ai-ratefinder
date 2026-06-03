@@ -1,7 +1,8 @@
 <script setup lang="ts">
 definePageMeta({ layout: 'default' })
 
-type ParserMode = 'auto' | 'internal' | 'chandra'
+type ParserMode = 'auto' | 'internal' | 'chandra' | 'sarvam'
+type SarvamLanguage = 'en-IN' | 'hi-IN' | 'bn-IN' | 'gu-IN' | 'kn-IN' | 'ml-IN' | 'mr-IN' | 'or-IN' | 'pa-IN' | 'ta-IN' | 'te-IN' | 'ur-IN' | 'as-IN' | 'bodo-IN' | 'doi-IN' | 'ks-IN' | 'kok-IN' | 'mai-IN' | 'mni-IN' | 'ne-IN' | 'sa-IN' | 'sat-IN' | 'sd-IN'
 
 interface EvalRow {
   raw_name: string
@@ -28,10 +29,12 @@ interface EvalResult {
   filename: string
   internal: EvalSide
   chandra: EvalSide
+  sarvam: EvalSide
   comparison: {
-    overlap_count: number
+    shared_count: number
     internal_only_count: number
     chandra_only_count: number
+    sarvam_only_count: number
   }
 }
 
@@ -53,14 +56,47 @@ const modeOptions: Array<{ value: ParserMode; label: string; description: string
     label: 'Chandra only',
     description: 'Use the OCR and structured extraction pipeline for every upload.',
     icon: 'i-lucide-cloud'
+  },
+  {
+    value: 'sarvam',
+    label: 'Sarvam only',
+    description: 'Use Sarvam Document Intelligence with HTML table output for every upload.',
+    icon: 'i-lucide-table-2'
   }
 ]
 
-const { data: settings, refresh: refreshSettings } = await useFetch<{ parser_mode: ParserMode }>('/api/admin/parser-settings', {
-  default: () => ({ parser_mode: 'auto' as ParserMode })
+const sarvamLanguageOptions: Array<{ value: SarvamLanguage; label: string }> = [
+  { value: 'en-IN', label: 'English' },
+  { value: 'hi-IN', label: 'Hindi' },
+  { value: 'bn-IN', label: 'Bengali' },
+  { value: 'gu-IN', label: 'Gujarati' },
+  { value: 'kn-IN', label: 'Kannada' },
+  { value: 'ml-IN', label: 'Malayalam' },
+  { value: 'mr-IN', label: 'Marathi' },
+  { value: 'or-IN', label: 'Odia' },
+  { value: 'pa-IN', label: 'Punjabi' },
+  { value: 'ta-IN', label: 'Tamil' },
+  { value: 'te-IN', label: 'Telugu' },
+  { value: 'ur-IN', label: 'Urdu' },
+  { value: 'as-IN', label: 'Assamese' },
+  { value: 'bodo-IN', label: 'Bodo' },
+  { value: 'doi-IN', label: 'Dogri' },
+  { value: 'ks-IN', label: 'Kashmiri' },
+  { value: 'kok-IN', label: 'Konkani' },
+  { value: 'mai-IN', label: 'Maithili' },
+  { value: 'mni-IN', label: 'Manipuri' },
+  { value: 'ne-IN', label: 'Nepali' },
+  { value: 'sa-IN', label: 'Sanskrit' },
+  { value: 'sat-IN', label: 'Santali' },
+  { value: 'sd-IN', label: 'Sindhi' }
+]
+
+const { data: settings, refresh: refreshSettings } = await useFetch<{ parser_mode: ParserMode; sarvam_language: SarvamLanguage }>('/api/admin/parser-settings', {
+  default: () => ({ parser_mode: 'auto' as ParserMode, sarvam_language: 'en-IN' as SarvamLanguage })
 })
 
 const selectedMode = ref<ParserMode>(settings.value?.parser_mode ?? 'auto')
+const selectedSarvamLanguage = ref<SarvamLanguage>(settings.value?.sarvam_language ?? 'en-IN')
 const saving = ref(false)
 const saveError = ref<string | null>(null)
 const saveSuccess = ref(false)
@@ -70,11 +106,16 @@ const evalError = ref<string | null>(null)
 const evaluating = ref(false)
 
 const activeMode = computed(() => settings.value?.parser_mode ?? 'auto')
-const modeChanged = computed(() => selectedMode.value !== activeMode.value)
+const activeSarvamLanguage = computed(() => settings.value?.sarvam_language ?? 'en-IN')
+const modeChanged = computed(() =>
+  selectedMode.value !== activeMode.value
+  || selectedSarvamLanguage.value !== activeSarvamLanguage.value
+)
 const evalSides = computed(() => evalResult.value
   ? [
       { key: 'internal', title: 'Internal parser', icon: 'i-lucide-cpu', data: evalResult.value.internal },
-      { key: 'chandra', title: 'Chandra OCR', icon: 'i-lucide-cloud', data: evalResult.value.chandra }
+      { key: 'chandra', title: 'Chandra OCR', icon: 'i-lucide-cloud', data: evalResult.value.chandra },
+      { key: 'sarvam', title: 'Sarvam OCR', icon: 'i-lucide-table-2', data: evalResult.value.sarvam }
     ]
   : []
 )
@@ -107,7 +148,10 @@ async function saveMode() {
   try {
     await $fetch('/api/admin/parser-settings', {
       method: 'PUT',
-      body: { parser_mode: selectedMode.value }
+      body: {
+        parser_mode: selectedMode.value,
+        sarvam_language: selectedSarvamLanguage.value
+      }
     })
     await refreshSettings()
     saveSuccess.value = true
@@ -167,7 +211,7 @@ function onPick(e: Event) {
             <div>
               <h2 class="text-base font-semibold">Parser mode</h2>
               <p class="mt-1 max-w-2xl text-sm text-muted">
-                This controls future Library uploads. The eval tool below always runs both parsers for comparison.
+                This controls future Library uploads. The eval tool below runs each parser for comparison.
               </p>
             </div>
             <UButton
@@ -180,7 +224,7 @@ function onPick(e: Event) {
             </UButton>
           </div>
 
-          <div class="mt-4 grid gap-3 md:grid-cols-3">
+          <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <button
               v-for="option in modeOptions"
               :key="option.value"
@@ -197,6 +241,23 @@ function onPick(e: Event) {
             </button>
           </div>
 
+          <div class="mt-4 max-w-sm">
+            <label for="sarvam-language" class="mb-1 block text-sm font-medium">Sarvam document language</label>
+            <select
+              id="sarvam-language"
+              v-model="selectedSarvamLanguage"
+              class="min-h-10 w-full rounded-lg border border-default bg-default px-3 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            >
+              <option
+                v-for="option in sarvamLanguageOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }} · {{ option.value }}
+              </option>
+            </select>
+          </div>
+
           <p v-if="saveError" class="mt-3 text-sm text-error">{{ saveError }}</p>
           <p v-else-if="saveSuccess" class="mt-3 text-sm text-success">Parser mode saved.</p>
         </section>
@@ -206,7 +267,7 @@ function onPick(e: Event) {
             <div>
               <h2 class="text-base font-semibold">Parser eval</h2>
               <p class="mt-1 max-w-2xl text-sm text-muted">
-                Upload a test file to run internal parsing and Chandra extraction side by side. Results are not saved to your Library.
+                Upload a test file to run internal parsing, Chandra extraction, and Sarvam extraction side by side. Results are not saved to your Library.
               </p>
             </div>
             <div>
@@ -234,21 +295,21 @@ function onPick(e: Event) {
 
           <div v-if="evaluating" class="mt-5 rounded-xl border border-dashed border-default bg-muted p-6">
             <div class="mb-2 flex items-center justify-between text-sm">
-              <span class="font-medium">Running both parsers</span>
-              <span class="text-muted">Chandra may take a few minutes</span>
+              <span class="font-medium">Running parsers</span>
+              <span class="text-muted">OCR parsers may take a few minutes</span>
             </div>
             <UProgress animation="carousel" />
           </div>
 
           <div v-if="evalResult" class="mt-5 space-y-5">
-            <div class="grid gap-3 md:grid-cols-4">
+            <div class="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
               <div class="rounded-xl border border-default bg-muted p-4">
                 <div class="text-xs font-medium uppercase tracking-wide text-muted">File</div>
                 <div class="mt-1 truncate text-sm font-semibold">{{ evalResult.filename }}</div>
               </div>
               <div class="rounded-xl border border-default bg-muted p-4">
-                <div class="text-xs font-medium uppercase tracking-wide text-muted">Overlap</div>
-                <div class="mt-1 text-2xl font-semibold tabular-nums">{{ evalResult.comparison.overlap_count }}</div>
+                <div class="text-xs font-medium uppercase tracking-wide text-muted">Shared</div>
+                <div class="mt-1 text-2xl font-semibold tabular-nums">{{ evalResult.comparison.shared_count }}</div>
               </div>
               <div class="rounded-xl border border-default bg-muted p-4">
                 <div class="text-xs font-medium uppercase tracking-wide text-muted">Internal only</div>
@@ -258,9 +319,13 @@ function onPick(e: Event) {
                 <div class="text-xs font-medium uppercase tracking-wide text-muted">Chandra only</div>
                 <div class="mt-1 text-2xl font-semibold tabular-nums">{{ evalResult.comparison.chandra_only_count }}</div>
               </div>
+              <div class="rounded-xl border border-default bg-muted p-4">
+                <div class="text-xs font-medium uppercase tracking-wide text-muted">Sarvam only</div>
+                <div class="mt-1 text-2xl font-semibold tabular-nums">{{ evalResult.comparison.sarvam_only_count }}</div>
+              </div>
             </div>
 
-            <div class="grid gap-4 xl:grid-cols-2">
+            <div class="grid gap-4 2xl:grid-cols-3">
               <article
                 v-for="side in evalSides"
                 :key="side.key"

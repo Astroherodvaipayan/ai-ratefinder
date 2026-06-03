@@ -1,5 +1,7 @@
 import { parseInternalPriceDocument } from '../../utils/internalPriceParser'
 import { runChandraPriceExtraction, type ExtractedPriceRow } from '../../utils/priceExtraction'
+import { getParserSettings } from '../../utils/parserSettings'
+import { runSarvamPriceExtraction } from '../../utils/sarvam'
 import {
   MAX_DOCUMENT_UPLOAD_BYTES,
   documentUploadSizeError
@@ -34,18 +36,30 @@ function rowKey(row: PriceRow | ExtractedPriceRow) {
   return `${sku || name}|${price}`
 }
 
-function compareRows(internalRows: EvalRows, chandraRows: EvalRows) {
-  const internalKeys = new Set(internalRows.map(rowKey))
-  const chandraKeys = new Set(chandraRows.map(rowKey))
-  let overlap_count = 0
-  for (const key of internalKeys) {
-    if (chandraKeys.has(key)) overlap_count++
+function compareRows(params: {
+  internalRows: EvalRows
+  chandraRows: EvalRows
+  sarvamRows: EvalRows
+}) {
+  const rowSets = {
+    internal: new Set(params.internalRows.map(rowKey)),
+    chandra: new Set(params.chandraRows.map(rowKey)),
+    sarvam: new Set(params.sarvamRows.map(rowKey))
+  }
+  const allKeys = new Set([...rowSets.internal, ...rowSets.chandra, ...rowSets.sarvam])
+  let shared_count = 0
+  for (const key of allKeys) {
+    const appearances = Number(rowSets.internal.has(key))
+      + Number(rowSets.chandra.has(key))
+      + Number(rowSets.sarvam.has(key))
+    if (appearances >= 2) shared_count++
   }
 
   return {
-    overlap_count,
-    internal_only_count: [...internalKeys].filter(key => !chandraKeys.has(key)).length,
-    chandra_only_count: [...chandraKeys].filter(key => !internalKeys.has(key)).length
+    shared_count,
+    internal_only_count: [...rowSets.internal].filter(key => !rowSets.chandra.has(key) && !rowSets.sarvam.has(key)).length,
+    chandra_only_count: [...rowSets.chandra].filter(key => !rowSets.internal.has(key) && !rowSets.sarvam.has(key)).length,
+    sarvam_only_count: [...rowSets.sarvam].filter(key => !rowSets.internal.has(key) && !rowSets.chandra.has(key)).length
   }
 }
 
@@ -83,7 +97,9 @@ async function timedSide<T extends { rows: EvalRows; warnings: string[] }>(
 }
 
 export default defineEventHandler(async (event) => {
-  await requireUser(event)
+  const user = await requireUser(event)
+  const client = await userClient(event)
+  const settings = await getParserSettings(client, user.id)
   const form = await readMultipartFormData(event)
   const filePart = form?.find(part => part.name === 'file')
 
@@ -101,7 +117,7 @@ export default defineEventHandler(async (event) => {
   const filename = filePart.filename
   const mime = filePart.type ?? null
 
-  const [internalResult, chandraResult] = await Promise.all([
+  const [internalResult, chandraResult, sarvamResult] = await Promise.all([
     timedSide(
       'internal',
       () => parseInternalPriceDocument({ fileData, filename, mime }),
@@ -110,15 +126,26 @@ export default defineEventHandler(async (event) => {
     timedSide(
       'chandra',
       () => runChandraPriceExtraction({ fileData, filename, mime })
+    ),
+    timedSide(
+      'sarvam',
+      () => runSarvamPriceExtraction({
+        fileData,
+        filename,
+        mime,
+        language: settings.sarvam_language
+      })
     )
   ])
   const { allRows: internalRows, ...internal } = internalResult
   const { allRows: chandraRows, ...chandra } = chandraResult
+  const { allRows: sarvamRows, ...sarvam } = sarvamResult
 
   return {
     filename,
     internal,
     chandra,
-    comparison: compareRows(internalRows, chandraRows)
+    sarvam,
+    comparison: compareRows({ internalRows, chandraRows, sarvamRows })
   }
 })
