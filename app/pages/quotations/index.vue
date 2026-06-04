@@ -14,6 +14,9 @@ const { data: quotations, refresh } = useFetch<Quotation[]>('/api/quotations', {
 
 const router = useRouter()
 const newTitle = ref('')
+const deletingId = ref<string | null>(null)
+const deleteError = ref('')
+
 async function createQuotation() {
   const q = await $fetch<Quotation>('/api/quotations', {
     method: 'POST',
@@ -23,6 +26,22 @@ async function createQuotation() {
   quotations.value = [q, ...quotations.value]
   void refresh()
   router.push(`/quotations/${q.id}`)
+}
+
+async function deleteQuotation(q: Quotation) {
+  if (!confirm(`Delete "${q.title}"?`)) return
+
+  deletingId.value = q.id
+  deleteError.value = ''
+  try {
+    await $fetch(`/api/quotations/${q.id}`, { method: 'DELETE' })
+    quotations.value = quotations.value.filter(item => item.id !== q.id)
+    void refresh()
+  } catch (err: any) {
+    deleteError.value = err?.statusMessage || err?.message || 'Could not delete quotation.'
+  } finally {
+    deletingId.value = null
+  }
 }
 
 const statusColor = (s: string) =>
@@ -40,24 +59,38 @@ const statusColor = (s: string) =>
     </header>
 
     <div class="flex-1 overflow-y-auto px-6 py-4">
+      <p v-if="deleteError" class="mb-3 text-sm text-error">{{ deleteError }}</p>
       <p v-if="!quotations.length" class="text-sm text-muted">
         No quotations yet. Add items from chat or start one here.
       </p>
       <ul v-else class="space-y-2">
         <li v-for="q in quotations" :key="q.id">
-          <NuxtLink
-            :to="`/quotations/${q.id}`"
-            class="flex items-center justify-between gap-3 rounded-lg border border-default px-4 py-3 hover:bg-accented"
-          >
-            <div>
-              <div class="text-sm font-medium">{{ q.title }}</div>
-              <div class="text-xs text-muted">
-                {{ q.customer ?? 'No customer' }} ·
-                disc {{ q.discount_pct }}% · GST {{ q.gst_pct }}%
+          <div class="flex items-center gap-2 rounded-lg border border-default px-3 py-3 transition hover:bg-accented">
+            <NuxtLink
+              :to="`/quotations/${q.id}`"
+              class="flex min-w-0 flex-1 items-center justify-between gap-3"
+            >
+              <div class="min-w-0">
+                <div class="truncate text-sm font-medium">{{ q.title }}</div>
+                <div class="truncate text-xs text-muted">
+                  {{ q.customer ?? 'No customer' }} ·
+                  disc {{ q.discount_pct }}% · GST {{ q.gst_pct }}%
+                </div>
               </div>
-            </div>
-            <UBadge :color="statusColor(q.status)" variant="soft">{{ q.status }}</UBadge>
-          </NuxtLink>
+              <UBadge :color="statusColor(q.status)" variant="soft" class="shrink-0">{{ q.status }}</UBadge>
+            </NuxtLink>
+            <UButton
+              size="sm"
+              color="error"
+              variant="soft"
+              icon="i-lucide-trash-2"
+              :loading="deletingId === q.id"
+              :disabled="Boolean(deletingId)"
+              :aria-label="`Delete ${q.title}`"
+              title="Delete quotation"
+              @click="deleteQuotation(q)"
+            />
+          </div>
         </li>
       </ul>
     </div>
