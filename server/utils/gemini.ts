@@ -150,22 +150,83 @@ export async function answerFromCandidates(
     `Candidate rows (the only sources you may cite):\n${JSON.stringify(candidatesBlock, null, 2)}`
   ].join('\n')
 
-  const res = await gemini().models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: prompt,
-    config: {
-      systemInstruction: ANSWER_SYSTEM,
-      responseMimeType: 'application/json',
-      responseSchema: ANSWER_SCHEMA,
-      temperature: 0.2
+  let res: Awaited<ReturnType<ReturnType<typeof gemini>['models']['generateContent']>>
+  try {
+    res = await gemini().models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        systemInstruction: ANSWER_SYSTEM,
+        responseMimeType: 'application/json',
+        responseSchema: ANSWER_SCHEMA,
+        temperature: 0.2
+      }
+    })
+  } catch (err) {
+    if (isModelRateLimitError(err)) {
+      console.warn('Gemini rate limited; falling back to retrieved candidates.', {
+        candidateCount: candidates.length
+      })
+      return fallbackAnswerFromCandidates(candidates)
     }
-  })
+    throw err
+  }
 
   const text = res.text ?? '{}'
   try {
     return JSON.parse(text) as ChatAnswer
   } catch {
     return { answer_text: 'Sorry, I could not parse a confident answer.', items: [] }
+  }
+}
+
+function isModelRateLimitError(err: unknown) {
+  const value = err as {
+    status?: number | string
+    statusCode?: number | string
+    code?: number | string
+    message?: string
+  }
+  const numericStatus = Number(value?.status ?? value?.statusCode ?? value?.code)
+  if (numericStatus === 429) return true
+
+  const text = [
+    value?.status,
+    value?.statusCode,
+    value?.code,
+    value?.message
+  ].filter(Boolean).join(' ')
+
+  return /\b429\b|resource[_ -]?exhausted|quota|rate limit|too many requests/i.test(text)
+}
+
+function fallbackAnswerFromCandidates(candidates: CandidateRow[]): ChatAnswer {
+  const priced = candidates
+    .filter(candidate => candidate.price !== null)
+    .slice(0, 8)
+
+  if (!priced.length) {
+    return {
+      answer_text: 'The AI summarizer is temporarily rate-limited, and I could not find a priced match in the retrieved document rows.',
+      items: []
+    }
+  }
+
+  return {
+    answer_text: `The AI summarizer is temporarily rate-limited, so I’m showing the top ${priced.length} retrieved priced match${priced.length === 1 ? '' : 'es'} directly.`,
+    items: priced.map(candidate => ({
+      doc_item_id: candidate.doc_item_id,
+      product_name: candidate.product_name,
+      sku: candidate.sku,
+      unit: candidate.unit,
+      price: candidate.price,
+      moq: candidate.moq,
+      currency: candidate.currency,
+      vendor: candidate.vendor,
+      source_document: candidate.source_document,
+      source_page: candidate.source_page,
+      confidence: 0.55
+    }))
   }
 }
 
