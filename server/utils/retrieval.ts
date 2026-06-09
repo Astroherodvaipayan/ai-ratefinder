@@ -10,7 +10,7 @@ import type { CandidateRow } from './gemini'
 import { parsePriceRowsFromGrid } from './internalPriceParser'
 
 const CONTEXT_RADIUS = 10  // lines on either side of the matched row
-const MAX_SEARCH_SHARDS = 6
+const MAX_SEARCH_SHARDS = 24
 const MARKDOWN_RECOVERY_SCOPED_DOC_LIMIT = 100
 const MARKDOWN_RECOVERY_TARGETED_DOC_LIMIT = 25
 const MARKDOWN_RECOVERY_FALLBACK_DOC_LIMIT = 30
@@ -70,11 +70,19 @@ export function searchShards(question: string): string[] {
     .split(/\n|,|;|\band\b|&|\+/i)
     .map(s => s.trim())
     .filter(s => s.length >= 2)
+  const includeWholeQuestion = clauses.length <= 1
 
   const skuLike = (question.match(/[A-Za-z]+[-/]?\d[A-Za-z0-9./-]*|[A-Za-z]*\d[A-Za-z0-9./-]*|[A-Z]{2,}[A-Z0-9./-]*/g) ?? [])
     .map(s => s.trim())
     .filter(isUsefulSkuShard)
-  const baseTexts = unique([question, ...clauses, ...coAxialVariants(question)])
+  const normalizedClauses = clauses.map(normaliseSearchText).filter(Boolean)
+  const baseTexts = unique([
+    ...clauses,
+    ...normalizedClauses,
+    ...(includeWholeQuestion ? [normaliseSearchText(question), question] : []),
+    ...clauses.flatMap(coAxialVariants),
+    ...electricalQueryVariants(question)
+  ])
   const punctuationVariants = baseTexts
     .flatMap(text => [
       text.replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ').trim(),
@@ -84,10 +92,13 @@ export function searchShards(question: string): string[] {
     .filter(text => text.length >= 2)
 
   return unique([
-    question.trim(),
     ...clauses,
+    ...normalizedClauses,
+    ...(includeWholeQuestion ? [question.trim()] : []),
     ...punctuationVariants,
-    ...skuLike
+    ...skuLike,
+    ...skuLike.map(normaliseSearchText),
+    ...electricalQueryVariants(question)
   ].filter(Boolean)).slice(0, MAX_SEARCH_SHARDS)
 }
 
@@ -99,6 +110,37 @@ function isUsefulSkuShard(value: string) {
   if (normalised.length <= 3) return true
   if (['cat6', 'frls', 'xlpe', 'pvc'].includes(normalised)) return true
   return false
+}
+
+function electricalQueryVariants(text: string): string[] {
+  const parts = text
+    .split(/\n|,|;|\band\b|&|\+/i)
+    .map(part => part.trim())
+    .filter(part => part.length >= 2)
+  const includeWholeText = parts.length <= 1
+  const normalizedTexts = unique([
+    ...(includeWholeText ? [normaliseSearchText(text)] : []),
+    ...parts.map(part => normaliseSearchText(part))
+  ].filter(Boolean))
+  const variants = new Set<string>(normalizedTexts)
+
+  for (const normalized of normalizedTexts) {
+    for (const match of normalized.matchAll(/\b(\d+(?:\.\d+)?)\s+sqmm(?:\s+(\d+)\s+core)?/gi)) {
+      const size = match[1]
+      const core = match[2]
+      if (!size) continue
+      variants.add(core ? `${size} sqmm ${core} core` : `${size} sqmm`)
+      variants.add(core ? `${size}sqmm${core}core` : `${size}sqmm`)
+    }
+
+    for (const match of normalized.matchAll(/\b(\d+(?:\.\d+)?)\s+sqmm\b.*?\b(\d+(?:\.\d+)?)\s+mtr\b/gi)) {
+      const size = match[1]
+      const length = match[2]
+      if (size && length) variants.add(`${size} sqmm ${length} mtr`)
+    }
+  }
+
+  return [...variants].filter(variant => variant.length >= 2)
 }
 
 export async function retrieveCandidates(
@@ -249,18 +291,31 @@ function sortedSearchRows(rowsById: Map<string, RetrievedRow>, limit: number) {
 }
 
 function normaliseSearchText(text: string) {
+  const decimalMarker = 'p'
+
   return text
     .toLowerCase()
-    .replace(/\bmet(?:er|re)s?\b/g, 'mtr')
-    .replace(/\bmtrs?\.?\b/g, 'mtr')
-    .replace(/\btransparent\b/g, 'transparent')
+    .replace(/[×*]/g, ' x ')
+    .replace(/\bfr\s*[-_/]?\s*ls\b/g, ' frls ')
+    .replace(/\bcu\b/g, ' copper ')
+    .replace(/\bal\b/g, ' aluminium ')
+    .replace(/\barm(?:ou?red|ored|d)?\.?\b/g, ' armoured ')
+    .replace(/(\d+(?:\.\d+)?)\s*sq\.?\s*mm\s*x\s*(\d+)\s*(?:cores?|core|c)\b/g, '$1 sqmm $2 core')
+    .replace(/(\d+(?:\.\d+)?)\s*sq\.?\s*mm\b/g, '$1 sqmm')
+    .replace(/(\d+)\s*(?:cores?|core|c)\b/g, '$1 core')
+    .replace(/(\d+(?:\.\d+)?)\s*(?:mtrs?\.?|met(?:er|re)s?|mtr)\b/g, '$1 mtr')
+    .replace(/([a-z])(\d)/g, '$1 $2')
+    .replace(/(\d)([a-z])/g, '$1 $2')
+    .replace(/([0-9a-z])\s*x\s*([0-9])/g, '$1 $2')
+    .replace(/(\d)\.(\d)/g, `$1${decimalMarker}$2`)
     .replace(/[^a-z0-9]+/g, ' ')
+    .replace(new RegExp(`(\\d)${decimalMarker}(\\d)`, 'g'), '$1.$2')
     .replace(/\s+/g, ' ')
     .trim()
 }
 
 function compactSearchText(text: string) {
-  return normaliseSearchText(text).replace(/\s+/g, '')
+  return normaliseSearchText(text).replace(/[^a-z0-9]+/g, '')
 }
 
 function queryIntentTokens(question: string) {
@@ -271,15 +326,20 @@ function queryIntentTokens(question: string) {
     'rates', 'show', 'tell', 'the', 'there', 'these', 'this', 'what', 'when', 'where',
     'which', 'with', 'would', 'you', 'your'
   ])
+  const shortDomainTokens = new Set(['fr'])
   return unique(normaliseSearchText(question)
     .split(' ')
-    .filter(token => (/^\d+$/.test(token) ? token.length >= 1 : token.length >= 3) && !stop.has(token)))
-    .slice(0, 8)
+    .filter(token => {
+      const isNumber = /^\d+(?:\.\d+)?$/.test(token)
+      const usefulLength = isNumber || token.length >= 3 || shortDomainTokens.has(token)
+      return usefulLength && !stop.has(token)
+    }))
+    .slice(0, 12)
 }
 
 function shouldRecoverFromMarkdown(
   question: string,
-  rows: Array<{ raw_name: string; sku: string | null; unit?: string | null; price?: number | null }>
+  rows: Array<{ raw_name: string; sku: string | null; unit?: string | null; price?: number | null; vendor?: string | null; filename?: string | null }>
 ) {
   const tokens = queryIntentTokens(question)
   if (!tokens.length) return !rows.length
@@ -287,7 +347,7 @@ function shouldRecoverFromMarkdown(
 
   return !rows.some(row => {
     if (row.price === null || row.price === undefined) return false
-    const haystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''}`)
+    const haystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''} ${row.vendor ?? ''} ${row.filename ?? ''}`)
     return tokens.every(token => haystack.includes(token))
   })
 }
@@ -400,8 +460,9 @@ function markdownLineBlocks(markdown: string): string[][][] {
   return blocks
 }
 
-function rowsMatchingQuestion(markdown: string, question: string) {
+function rowsMatchingQuestion(markdown: string, question: string, ignoredTokens: Set<string> = new Set()) {
   const tokens = queryIntentTokens(question)
+    .filter(token => !ignoredTokens.has(token))
   if (!tokens.length) return []
 
   const structuredGrids = [
@@ -501,8 +562,13 @@ async function recoverMarkdownDocItems(
 ) {
   const docs = await fetchMarkdownRecoveryDocs(client, params)
 
-  const rows = docs.flatMap(doc =>
-    rowsMatchingQuestion((doc.parsed_markdown as string) ?? '', params.question)
+  const rows = docs.flatMap(doc => {
+    const docTokens = new Set(queryIntentTokens([
+      doc.filename,
+      (doc as any).vendor?.name
+    ].filter(Boolean).join(' ')))
+
+    return rowsMatchingQuestion((doc.parsed_markdown as string) ?? '', params.question, docTokens)
       .filter(row => row.price !== null)
       .map(row => ({
         owner_id: params.ownerId,
@@ -516,7 +582,7 @@ async function recoverMarkdownDocItems(
         source_page: row.source_page ?? null,
         raw_row: { recovered_from: 'parsed_markdown' }
       }))
-  )
+  })
   if (!rows.length) return 0
 
   const { data: existing, error: existingError } = await client
@@ -566,7 +632,7 @@ async function fetchMarkdownRecoveryDocs(
 
   const baseQuery = () => applyScope(client
     .from('documents')
-    .select('id, parsed_markdown')
+    .select('id, filename, parsed_markdown, vendor:vendor_id(name)')
     .eq('status', 'parsed')
     .not('parsed_markdown', 'is', null))
 
@@ -575,24 +641,29 @@ async function fetchMarkdownRecoveryDocs(
     .slice(0, 4)
 
   if (textTokens.length) {
+    const tokenOr = textTokens
+      .flatMap(token => [
+        `parsed_markdown.ilike.%${token}%`,
+        `filename.ilike.%${token}%`
+      ])
+      .join(',')
+
     let tokenQuery = baseQuery()
       .order('created_at', { ascending: false })
       .limit(markdownRecoveryLimit(params, true))
 
-    for (const token of textTokens) {
-      tokenQuery = tokenQuery.ilike('parsed_markdown', `%${token}%`)
-    }
+    tokenQuery = tokenQuery.or(tokenOr)
 
     const { data, error } = await tokenQuery
     if (error) throw createError({ statusCode: 500, statusMessage: error.message })
-    if (data?.length) return data as Array<{ id: string; parsed_markdown: string | null }>
+    if (data?.length) return data as Array<{ id: string; filename: string | null; parsed_markdown: string | null; vendor?: { name?: string | null } | null }>
   }
 
   const { data, error } = await baseQuery()
     .order('created_at', { ascending: false })
     .limit(markdownRecoveryLimit(params, false))
   if (error) throw createError({ statusCode: 500, statusMessage: error.message })
-  return (data ?? []) as Array<{ id: string; parsed_markdown: string | null }>
+  return (data ?? []) as Array<{ id: string; filename: string | null; parsed_markdown: string | null; vendor?: { name?: string | null } | null }>
 }
 
 function markdownRecoveryLimit(
@@ -627,13 +698,18 @@ function mergeRowsByPriority(rows: RetrievedRow[]) {
   )
 }
 
-function scoreRow(row: { raw_name: string; sku: string | null; unit?: string | null }, question: string) {
+function scoreRow(
+  row: { raw_name: string; sku: string | null; unit?: string | null; vendor?: string | null; filename?: string | null },
+  question: string
+) {
   const shards = searchShards(question)
   const tokens = queryIntentTokens(question)
   const name = normaliseSearchText(row.raw_name)
   const sku = normaliseSearchText(row.sku ?? '')
   const unit = normaliseSearchText(row.unit ?? '')
-  const compactHaystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''}`)
+  const vendor = normaliseSearchText(row.vendor ?? '')
+  const filename = normaliseSearchText(row.filename ?? '')
+  const compactHaystack = compactSearchText(`${row.raw_name} ${row.sku ?? ''} ${row.unit ?? ''} ${row.vendor ?? ''} ${row.filename ?? ''}`)
   let score = tokens.length && tokens.every(token => compactHaystack.includes(token)) ? 10 : 0
 
   for (const shard of shards) {
@@ -646,6 +722,8 @@ function scoreRow(row: { raw_name: string; sku: string | null; unit?: string | n
     if (name.includes(q)) score += 4
     if (compact && compactHaystack.includes(compact)) score += 5
     if (unit.includes(q)) score += 1
+    if (vendor.includes(q)) score += 3
+    if (filename.includes(q)) score += 1
   }
 
   return score
@@ -677,22 +755,27 @@ async function retrieveNormalizedFallback(
   if (error) throw createError({ statusCode: 500, statusMessage: error.message })
 
   return ((data ?? []) as any[])
-    .map((row, index) => ({
-      doc_item_id: row.id,
-      document_id: row.document_id,
-      raw_name: row.raw_name,
-      sku: row.sku,
-      unit: row.unit,
-      price: row.price,
-      moq: row.moq,
-      currency: row.currency,
-      source_page: row.source_page,
-      filename: row.documents?.filename ?? 'Unknown document',
-      vendor: row.documents?.vendor?.name ?? 'Unknown',
-      source_uploaded_at: row.documents?.created_at ?? null,
-      rank: index,
-      score: scoreRow(row, question)
-    }))
+    .map((row, index) => {
+      const hydrated = {
+        doc_item_id: row.id,
+        document_id: row.document_id,
+        raw_name: row.raw_name,
+        sku: row.sku,
+        unit: row.unit,
+        price: row.price,
+        moq: row.moq,
+        currency: row.currency,
+        source_page: row.source_page,
+        filename: row.documents?.filename ?? 'Unknown document',
+        vendor: row.documents?.vendor?.name ?? 'Unknown',
+        source_uploaded_at: row.documents?.created_at ?? null,
+        rank: index
+      }
+      return {
+        ...hydrated,
+        score: scoreRow(hydrated, question)
+      }
+    })
     .filter(row => row.score > 0)
     .sort((a, b) => b.score - a.score || a.rank - b.rank)
     .slice(0, limit)
