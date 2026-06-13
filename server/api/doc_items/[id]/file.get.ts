@@ -4,12 +4,24 @@ import { adminClient } from '../../../utils/supabase'
 export default defineEventHandler(async (event) => {
   await requireUser(event)
   const id = getRouterParam(event, 'id')!
+  const query = getQuery(event)
   const client = await userClient(event)
 
-  const { data: di, error } = await client
+  let { data: di, error } = await client
     .from('doc_items')
     .select('document_id, source_page, documents:document_id(storage_path, mime)')
-    .eq('id', id).single()
+    .eq('id', id).maybeSingle()
+
+  if (!di) {
+    const canonical = await client
+      .from('doc_price_items')
+      .select('document_id, source_page, documents:document_id(storage_path, mime)')
+      .eq('id', id)
+      .maybeSingle()
+    di = canonical.data as any
+    error = canonical.error as any
+  }
+
   if (error || !di) throw createError({ statusCode: 404, statusMessage: 'not found' })
 
   const path = (di as any).documents?.storage_path
@@ -18,5 +30,9 @@ export default defineEventHandler(async (event) => {
   const { data, error: signErr } = await adminClient().storage
     .from('uploads').createSignedUrl(path, 300)
   if (signErr || !data) throw createError({ statusCode: 500, statusMessage: signErr?.message ?? 'sign failed' })
+  const signedUrl = di.source_page ? `${data.signedUrl}#page=${di.source_page}` : data.signedUrl
+  if (query.redirect === '1') {
+    return sendRedirect(event, signedUrl, 302)
+  }
   return { url: data.signedUrl, page: di.source_page, mime: (di as any).documents?.mime }
 })

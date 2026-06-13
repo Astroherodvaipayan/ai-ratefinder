@@ -39,6 +39,11 @@ export interface CandidateRow {
   source_uploaded_at: string | null
   source_page: number | null
   context_md: string                  // ±10 lines of markdown around the row
+  match_confidence?: number | null
+  matched_table?: string | null
+  matched_row?: string | null
+  matched_column?: string | null
+  match_explanation?: string | null
 }
 
 export interface ChatTurn { role: 'user' | 'assistant'; content: string }
@@ -62,6 +67,10 @@ export interface ChatAnswer {
     source_document: string
     source_page: number | null
     confidence: number
+    matched_table?: string | null
+    matched_row?: string | null
+    matched_column?: string | null
+    match_explanation?: string | null
   }>
 }
 
@@ -84,7 +93,11 @@ const ANSWER_SCHEMA = {
           vendor:       { type: Type.STRING },
           source_document: { type: Type.STRING },
           source_page:  { type: Type.NUMBER, nullable: true },
-          confidence:   { type: Type.NUMBER }
+          confidence:   { type: Type.NUMBER },
+          matched_table: { type: Type.STRING, nullable: true },
+          matched_row: { type: Type.STRING, nullable: true },
+          matched_column: { type: Type.STRING, nullable: true },
+          match_explanation: { type: Type.STRING, nullable: true }
         },
         required: ['doc_item_id', 'product_name', 'vendor', 'confidence']
       }
@@ -113,6 +126,10 @@ Style:
   user's intent (gauge, brand, length, etc.).
 - If the same product/SKU appears in multiple uploaded documents, prefer the
   newest source_uploaded_at unless the user explicitly asks for older rates.
+- For electrical matrix-table matches, use matched_table, matched_row,
+  matched_column, and match_explanation when supplied. These indicate that the
+  user's shorthand was mapped to a table title + row + column, even if the
+  full query text does not appear literally in the PDF.
 `.trim()
 
 export async function answerFromCandidates(
@@ -133,6 +150,11 @@ export async function answerFromCandidates(
     source_document: c.source_document,
     source_uploaded_at: c.source_uploaded_at,
     source_page: c.source_page,
+    match_confidence: c.match_confidence,
+    matched_table: c.matched_table,
+    matched_row: c.matched_row,
+    matched_column: c.matched_column,
+    match_explanation: c.match_explanation,
     surrounding_markdown: c.context_md
   }))
 
@@ -163,11 +185,13 @@ export async function answerFromCandidates(
       }
     })
   } catch (err) {
-    if (isModelRateLimitError(err)) {
-      console.warn('Gemini rate limited; falling back to retrieved candidates.', {
+    const fallbackReason = geminiFallbackReason(err)
+    if (fallbackReason) {
+      console.warn('Gemini unavailable; falling back to retrieved candidates.', {
+        reason: fallbackReason.kind,
         candidateCount: candidates.length
       })
-      return fallbackAnswerFromCandidates(candidates)
+      return fallbackAnswerFromCandidates(candidates, fallbackReason.message)
     }
     throw err
   }
@@ -180,7 +204,10 @@ export async function answerFromCandidates(
   }
 }
 
-function isModelRateLimitError(err: unknown) {
+function geminiFallbackReason(err: unknown): null | {
+  kind: 'billing_or_quota' | 'rate_limit'
+  message: string
+} {
   const value = err as {
     status?: number | string
     statusCode?: number | string
@@ -188,7 +215,6 @@ function isModelRateLimitError(err: unknown) {
     message?: string
   }
   const numericStatus = Number(value?.status ?? value?.statusCode ?? value?.code)
-  if (numericStatus === 429) return true
 
   const text = [
     value?.status,
@@ -197,23 +223,40 @@ function isModelRateLimitError(err: unknown) {
     value?.message
   ].filter(Boolean).join(' ')
 
-  return /\b429\b|resource[_ -]?exhausted|quota|rate limit|too many requests/i.test(text)
+  if (
+    /\bprepay(?:ment)?\b|credits? (?:are )?depleted|billing|quota|resource[_ -]?exhausted/i
+      .test(text)
+  ) {
+    return {
+      kind: 'billing_or_quota',
+      message: 'The AI summarizer is unavailable because the Gemini API quota or billing check failed'
+    }
+  }
+
+  if (numericStatus === 429 || /\b429\b|rate limit|too many requests/i.test(text)) {
+    return {
+      kind: 'rate_limit',
+      message: 'The AI summarizer is temporarily rate-limited'
+    }
+  }
+
+  return null
 }
 
-function fallbackAnswerFromCandidates(candidates: CandidateRow[]): ChatAnswer {
+function fallbackAnswerFromCandidates(candidates: CandidateRow[], reason: string): ChatAnswer {
   const priced = candidates
     .filter(candidate => candidate.price !== null)
     .slice(0, 8)
 
   if (!priced.length) {
     return {
-      answer_text: 'The AI summarizer is temporarily rate-limited, and I could not find a priced match in the retrieved document rows.',
+      answer_text: `${reason}, and I could not find a priced match in the retrieved document rows.`,
       items: []
     }
   }
 
   return {
-    answer_text: `The AI summarizer is temporarily rate-limited, so I’m showing the top ${priced.length} retrieved priced match${priced.length === 1 ? '' : 'es'} directly.`,
+    answer_text: `${reason}, so I’m showing the top ${priced.length} retrieved priced match${priced.length === 1 ? '' : 'es'} directly.`,
     items: priced.map(candidate => ({
       doc_item_id: candidate.doc_item_id,
       product_name: candidate.product_name,
@@ -225,7 +268,11 @@ function fallbackAnswerFromCandidates(candidates: CandidateRow[]): ChatAnswer {
       vendor: candidate.vendor,
       source_document: candidate.source_document,
       source_page: candidate.source_page,
-      confidence: 0.55
+      confidence: candidate.match_confidence ?? 0.55,
+      matched_table: candidate.matched_table ?? null,
+      matched_row: candidate.matched_row ?? null,
+      matched_column: candidate.matched_column ?? null,
+      match_explanation: candidate.match_explanation ?? null
     }))
   }
 }
@@ -252,8 +299,12 @@ export function constrainChatAnswer(answer: ChatAnswer, candidates: CandidateRow
       source_document: candidate.source_document,
       source_page: candidate.source_page,
       confidence: Number.isFinite(confidence)
-        ? Math.max(0, Math.min(1, confidence))
-        : 0.5
+        ? Math.max(0, Math.min(1, Math.max(confidence, candidate.match_confidence ?? 0)))
+        : candidate.match_confidence ?? 0.5,
+      matched_table: candidate.matched_table ?? item.matched_table ?? null,
+      matched_row: candidate.matched_row ?? item.matched_row ?? null,
+      matched_column: candidate.matched_column ?? item.matched_column ?? null,
+      match_explanation: candidate.match_explanation ?? item.match_explanation ?? null
     }]
   })
 

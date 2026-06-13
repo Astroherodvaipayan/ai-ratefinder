@@ -16,15 +16,21 @@ language sql immutable as $$
   terms as (
     select
       regexp_replace(
-        regexp_replace(
           regexp_replace(
-            regexp_replace(v, '\mfr[[:space:]]*[-_/]?[[:space:]]*ls\M', ' frls ', 'gi'),
-            '\mcu\M', ' copper ', 'gi'
+            regexp_replace(
+              regexp_replace(
+                regexp_replace(
+                  regexp_replace(v, '\mfr[[:space:]]*[-_/]?[[:space:]]*ls[[:space:]]*h\M', ' frlsh ', 'gi'),
+                  '\mfr[[:space:]]*[-_/]?[[:space:]]*ls\M', ' frls ', 'gi'
+                ),
+                '\mcu\M', ' copper ', 'gi'
+              ),
+              '\mal\M', ' aluminium ', 'gi'
+            ),
+            '\mun[[:space:]]*[-_/]?[[:space:]]*arm(ou?red|ored|d)?[.]?\M', ' unarmoured ', 'gi'
           ),
-          '\mal\M', ' aluminium ', 'gi'
-        ),
-        '\marm(ou?red|ored|d)?[.]?\M', ' armoured ', 'gi'
-      ) as v
+          '\marm(ou?red|ored|d)?[.]?\M', ' armoured ', 'gi'
+        ) as v
     from symbols
   ),
   dimensions as (

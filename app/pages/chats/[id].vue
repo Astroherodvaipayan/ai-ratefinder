@@ -6,7 +6,8 @@ const id = computed(() => route.params.id as string)
 const user = useSupabaseUser()
 
 interface CardItem {
-  doc_item_id: string
+  doc_item_id: string | null
+  doc_price_item_id?: string | null
   product_name: string
   sku: string | null
   unit: string | null
@@ -17,6 +18,26 @@ interface CardItem {
   source_document?: string
   source_page: number | null
   confidence: number
+  needs_review?: boolean
+  matched_table?: string | null
+  matched_row?: string | null
+  matched_column?: string | null
+  match_explanation?: string | null
+  alternatives?: CandidateAlternative[]
+}
+interface CandidateAlternative {
+  doc_item_id: string | null
+  doc_price_item_id?: string | null
+  description: string
+  sku: string | null
+  unit: string | null
+  price: number
+  currency: string
+  vendor: string | null
+  source_document: string
+  source_page: number | null
+  confidence: number
+  needs_review: boolean
 }
 interface Message {
   id: string; role: 'user' | 'assistant'
@@ -216,7 +237,56 @@ function scrollToBottom() {
 const showAddMenu = ref<string | null>(null) // doc_item_id
 const newQuotationTitle = ref('')
 
+function isQuoteReady(item: Pick<CardItem, 'confidence' | 'needs_review'>) {
+  return !item.needs_review && item.confidence >= 0.85
+}
+
+function statusLabel(item: Pick<CardItem, 'confidence' | 'needs_review'>) {
+  if (isQuoteReady(item)) return 'Ready to quote'
+  if (item.confidence >= 0.65) return 'Review first'
+  return 'Not safe to quote'
+}
+
+function messageHasAutoQuotedItems(message: Message) {
+  return Boolean(message.items?.some(item => isQuoteReady(item)))
+}
+
+function alternativeAsCardItem(base: CardItem, alternative: CandidateAlternative): CardItem {
+  return {
+    doc_item_id: alternative.doc_item_id,
+    doc_price_item_id: alternative.doc_price_item_id,
+    product_name: alternative.description,
+    sku: alternative.sku,
+    unit: alternative.unit,
+    price: alternative.price,
+    moq: null,
+    currency: alternative.currency,
+    vendor: alternative.vendor ?? base.vendor,
+    source_document: alternative.source_document,
+    source_page: alternative.source_page,
+    confidence: alternative.confidence,
+    needs_review: alternative.needs_review,
+    matched_table: null,
+    matched_row: null,
+    matched_column: null,
+    match_explanation: alternative.needs_review
+      ? 'Possible match: confirm before adding.'
+      : 'Possible match from the uploaded document.'
+  }
+}
+
 async function addToQuotation(item: CardItem, quotationId: string | null) {
+  if (!item.doc_price_item_id && !item.doc_item_id) {
+    error.value = 'This price candidate has no source record and cannot be added.'
+    return
+  }
+  if (!isQuoteReady(item)) {
+    const confirmed = window.confirm(
+      'This match needs review before it goes into the quotation. Add it anyway?'
+    )
+    if (!confirmed) return
+  }
+
   let qid = quotationId
   if (!qid) {
     const q = await $fetch<Quotation>('/api/quotations', {
@@ -229,21 +299,30 @@ async function addToQuotation(item: CardItem, quotationId: string | null) {
   }
   await $fetch(`/api/quotations/${qid}/items`, {
     method: 'POST',
-    body: { doc_item_id: item.doc_item_id, qty: 1 }
+    body: item.doc_price_item_id
+      ? { doc_price_item_id: item.doc_price_item_id, qty: 1, review_confirmed: !isQuoteReady(item) }
+      : { doc_item_id: item.doc_item_id, qty: 1, review_confirmed: !isQuoteReady(item) }
   })
   showAddMenu.value = null
   // Light toast via console for now
   console.info('Added', item.product_name, 'to quotation', qid)
 }
 
+async function addAlternativeToQuotation(base: CardItem, alternative: CandidateAlternative, quotationId: string | null) {
+  if (alternative.confidence < 0.65) {
+    error.value = 'Low-confidence alternatives cannot be added to a quotation.'
+    return
+  }
+  await addToQuotation(alternativeAsCardItem(base, alternative), quotationId)
+}
+
 async function openProforma() {
   if (chat.value?.quotation_id) await navigateTo(`/quotations/${chat.value.quotation_id}`)
 }
 
-async function viewSource(item: CardItem) {
-  const res = await $fetch<{ url: string }>(`/api/doc_items/${item.doc_item_id}/file`)
-    .catch(() => null)
-  if (res?.url) window.open(res.url, '_blank')
+function sourceHref(item: Pick<CardItem, 'doc_price_item_id' | 'doc_item_id'>) {
+  const sourceId = item.doc_price_item_id || item.doc_item_id
+  return sourceId ? `/api/doc_items/${sourceId}/file?redirect=1` : null
 }
 
 function formatMoney(n: number | null, currency = 'INR') {
@@ -360,14 +439,20 @@ async function onDocumentsUploaded() {
           <div v-if="m.items?.length" class="ml-0 grid grid-cols-1 gap-3 sm:ml-11 lg:grid-cols-2">
             <article
               v-for="it in m.items"
-              :key="it.doc_item_id"
-              class="rounded-2xl border border-default/70 bg-default/90 p-4 text-sm shadow-sm"
+              :key="it.doc_price_item_id || it.doc_item_id || it.product_name"
+              class="rounded-2xl border bg-default/90 p-4 text-sm shadow-sm"
+              :class="it.needs_review ? 'border-warning/60 ring-1 ring-warning/20' : 'border-default/70'"
             >
               <div class="flex items-start justify-between gap-3">
                 <h3 class="min-w-0 text-sm font-medium leading-5">{{ it.product_name }}</h3>
-                <UBadge :color="confidenceColor(it.confidence)" variant="soft" size="xs">
-                  {{ (it.confidence * 100).toFixed(0) }}%
-                </UBadge>
+                <div class="flex shrink-0 flex-col items-end gap-1">
+                  <UBadge v-if="it.needs_review" :color="confidenceColor(it.confidence)" variant="soft" size="xs">
+                    {{ (it.confidence * 100).toFixed(0) }}%
+                  </UBadge>
+                  <UBadge :color="it.needs_review ? 'warning' : 'success'" variant="subtle" size="xs">
+                    {{ statusLabel(it) }}
+                  </UBadge>
+                </div>
               </div>
 
               <div class="mt-3 flex items-baseline gap-2">
@@ -375,12 +460,75 @@ async function onDocumentsUploaded() {
                 <span class="text-xs text-muted">{{ it.unit ?? 'unit not stated' }}</span>
               </div>
 
+              <p
+                v-if="it.needs_review"
+                class="mt-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
+              >
+                Review required before quotation. This was not auto-added.
+              </p>
+
               <dl class="mt-4 grid grid-cols-[72px_1fr] gap-y-1.5 text-xs">
                 <dt class="text-muted">MOQ</dt><dd class="min-w-0 break-words">{{ it.moq ?? '—' }}</dd>
                 <dt class="text-muted">SKU</dt><dd class="min-w-0 break-words">{{ it.sku ?? '—' }}</dd>
                 <dt class="text-muted">Vendor</dt><dd class="min-w-0 break-words">{{ it.vendor }}</dd>
                 <dt class="text-muted">Source</dt><dd class="min-w-0 break-words">{{ sourceLabel(it) }}</dd>
+                <dt v-if="it.matched_table" class="text-muted">Table</dt>
+                <dd v-if="it.matched_table" class="min-w-0 break-words">{{ it.matched_table }}</dd>
+                <dt v-if="it.matched_row || it.matched_column" class="text-muted">Match</dt>
+                <dd v-if="it.matched_row || it.matched_column" class="min-w-0 break-words">
+                  {{ [it.matched_row, it.matched_column].filter(Boolean).join(' · ') }}
+                </dd>
+                <dt v-if="it.match_explanation" class="text-muted">Note</dt>
+                <dd v-if="it.match_explanation" class="min-w-0 break-words">{{ it.match_explanation }}</dd>
               </dl>
+
+              <details
+                v-if="it.alternatives?.length"
+                class="mt-4 rounded-lg border border-default/70 bg-muted/40 px-3 py-2 text-xs"
+              >
+                <summary class="cursor-pointer select-none font-medium text-toned">
+                  Other possible matches ({{ it.alternatives.length }})
+                </summary>
+                <div class="mt-3 space-y-3">
+                  <div
+                    v-for="alt in it.alternatives"
+                    :key="alt.doc_price_item_id || alt.doc_item_id || `${alt.description}-${alt.price}`"
+                    class="rounded-md border border-default/60 bg-default/70 p-3"
+                  >
+                    <div class="flex items-start justify-between gap-3">
+                      <p class="min-w-0 leading-5 text-highlighted">{{ alt.description }}</p>
+                      <UBadge :color="alt.confidence >= 0.85 ? 'success' : 'warning'" variant="soft" size="xs">
+                        {{ alt.confidence >= 0.85 ? 'Ready' : 'Review' }}
+                      </UBadge>
+                    </div>
+                    <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <span class="font-medium tabular-nums">
+                        {{ formatMoney(alt.price, alt.currency) }}
+                        <span class="font-normal text-muted">{{ alt.unit ?? '' }}</span>
+                      </span>
+                      <UDropdownMenu
+                        v-if="alt.confidence >= 0.65"
+                        :items="[[
+                          ...quotations.map(q => ({
+                            label: q.title,
+                            icon: 'i-lucide-file-text',
+                            onSelect: () => addAlternativeToQuotation(it, alt, q.id)
+                          })),
+                          { label: 'New quotation…', icon: 'i-lucide-plus',
+                            onSelect: () => addAlternativeToQuotation(it, alt, null) }
+                        ]]"
+                      >
+                        <UButton size="xs" variant="ghost" icon="i-lucide-check">
+                          Use
+                        </UButton>
+                      </UDropdownMenu>
+                    </div>
+                    <p class="mt-1 text-muted">
+                      {{ [alt.vendor, alt.source_document, alt.source_page ? `p.${alt.source_page}` : null].filter(Boolean).join(' · ') || 'Source not stated' }}
+                    </p>
+                  </div>
+                </div>
+              </details>
 
               <div class="mt-4 flex flex-wrap items-center justify-between gap-2">
                 <UDropdownMenu
@@ -394,19 +542,24 @@ async function onDocumentsUploaded() {
                       onSelect: () => addToQuotation(it, null) }
                   ]]"
                 >
-                  <UButton size="xs" variant="soft" icon="i-lucide-plus">
-                    Add
+                  <UButton size="xs" variant="soft" :color="it.needs_review ? 'warning' : 'primary'" icon="i-lucide-plus">
+                    {{ it.needs_review ? 'Confirm & add' : 'Add' }}
                   </UButton>
                 </UDropdownMenu>
-                <UButton size="xs" variant="ghost" icon="i-lucide-external-link" @click="viewSource(it)">
+                <a
+                  v-if="sourceHref(it)"
+                  :href="sourceHref(it)!"
+                  class="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted transition hover:bg-muted hover:text-highlighted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-highlighted"
+                >
+                  <UIcon name="i-lucide-external-link" />
                   Source
-                </UButton>
+                </a>
               </div>
             </article>
           </div>
 
           <div
-            v-if="m.items?.length && chat?.quotation_id"
+            v-if="messageHasAutoQuotedItems(m) && chat?.quotation_id"
             class="ml-0 flex items-center justify-between gap-3 rounded-2xl border border-default/70 bg-default/90 px-4 py-3 text-xs shadow-sm sm:ml-11"
           >
             <span class="text-muted">Draft proforma invoice updated with these cited items.</span>
