@@ -23,6 +23,10 @@ export default defineEventHandler(async (event) => {
     gst_pct:      Number(q.gst_pct),
     freight:      Number(q.freight),
     notes:        q.notes,
+    payment_terms: q.payment_terms,
+    delivery_terms: q.delivery_terms,
+    validity: q.validity,
+    revision_no: Number(q.revision_no ?? 1),
     items: (items ?? []).map((i: any) => ({
       line_no:     Number(i.line_no),
       description: i.description,

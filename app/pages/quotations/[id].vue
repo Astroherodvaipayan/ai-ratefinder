@@ -19,6 +19,10 @@ interface Quotation {
   status: 'draft' | 'sent' | 'archived'
   discount_pct: number; gst_pct: number; freight: number
   notes: string | null
+  payment_terms: string | null
+  delivery_terms: string | null
+  validity: string | null
+  revision_no: number
   items: Item[]; totals: Totals
 }
 
@@ -33,6 +37,11 @@ const customerField  = ref(q.value?.customer ?? '')
 const discountField  = ref(Number(q.value?.discount_pct ?? 0))
 const gstField       = ref(Number(q.value?.gst_pct ?? 18))
 const freightField   = ref(Number(q.value?.freight ?? 0))
+const paymentTermsField = ref(q.value?.payment_terms ?? '')
+const deliveryTermsField = ref(q.value?.delivery_terms ?? '')
+const validityField = ref(q.value?.validity ?? '')
+const revisionField = ref(Number(q.value?.revision_no ?? 1))
+const notesField = ref(q.value?.notes ?? '')
 
 watch(q, (next) => {
   if (!next) return
@@ -41,6 +50,11 @@ watch(q, (next) => {
   discountField.value = Number(next.discount_pct)
   gstField.value      = Number(next.gst_pct)
   freightField.value  = Number(next.freight)
+  paymentTermsField.value = next.payment_terms ?? ''
+  deliveryTermsField.value = next.delivery_terms ?? ''
+  validityField.value = next.validity ?? ''
+  revisionField.value = Number(next.revision_no ?? 1)
+  notesField.value = next.notes ?? ''
 }, { immediate: true })
 
 let saveTimer: any
@@ -56,7 +70,12 @@ async function saveQuotation() {
       customer: customerField.value || null,
       discount_pct: Number(discountField.value),
       gst_pct: Number(gstField.value),
-      freight: Number(freightField.value)
+      freight: Number(freightField.value),
+      payment_terms: paymentTermsField.value || null,
+      delivery_terms: deliveryTermsField.value || null,
+      validity: validityField.value || null,
+      revision_no: Number(revisionField.value) || 1,
+      notes: notesField.value || null
     }
   })
   await refresh()
@@ -142,6 +161,21 @@ const formatInr = (n: number | null | undefined) =>
         </UFormField>
         <UFormField label="Freight ₹">
           <UInput v-model.number="freightField" type="number" step="1" @blur="scheduleSave" />
+        </UFormField>
+        <UFormField label="Revision">
+          <UInput v-model.number="revisionField" type="number" min="1" step="1" @blur="scheduleSave" />
+        </UFormField>
+        <UFormField label="Validity">
+          <UInput v-model="validityField" placeholder="e.g. 15 days" @blur="scheduleSave" />
+        </UFormField>
+        <UFormField label="Payment terms" class="md:col-span-2">
+          <UInput v-model="paymentTermsField" placeholder="e.g. 50% advance, balance before dispatch" @blur="scheduleSave" />
+        </UFormField>
+        <UFormField label="Delivery terms" class="md:col-span-2">
+          <UInput v-model="deliveryTermsField" placeholder="e.g. Ex-works, 2 weeks from PO" @blur="scheduleSave" />
+        </UFormField>
+        <UFormField label="Notes" class="md:col-span-2">
+          <UTextarea v-model="notesField" :rows="2" @blur="scheduleSave" />
         </UFormField>
       </div>
 
