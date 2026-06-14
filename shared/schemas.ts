@@ -30,6 +30,15 @@ export const ChatItem = z.object({
   matched_column: z.string().nullable().optional(),
   match_explanation: z.string().nullable().optional(),
   suggested_query: z.string().nullable().optional(),
+  price_basis: z.object({
+    source_price: z.number(),
+    source_basis_quantity: z.number(),
+    source_basis_unit: z.string().nullable(),
+    source_basis_pack_unit: z.string().nullable(),
+    source_basis_label: z.string().nullable(),
+    effective_unit_price: z.number(),
+    effective_unit: z.string().nullable()
+  }).optional(),
   requested_quantity: z.object({
     value: z.number(),
     unit: z.string().nullable(),
@@ -48,6 +57,15 @@ export const ChatItem = z.object({
     source_page: z.number().int().nullable(),
     confidence: z.number().min(0).max(1),
     needs_review: z.boolean(),
+    price_basis: z.object({
+      source_price: z.number(),
+      source_basis_quantity: z.number(),
+      source_basis_unit: z.string().nullable(),
+      source_basis_pack_unit: z.string().nullable(),
+      source_basis_label: z.string().nullable(),
+      effective_unit_price: z.number(),
+      effective_unit: z.string().nullable()
+    }).optional(),
     suggested_query: z.string().nullable().optional()
   })).optional()
 })

@@ -6,11 +6,13 @@
  * or override a sourced rate while adding it.
  */
 import { z } from 'zod'
+import { inferPriceBasis, quotationRateForBasis } from '../../../utils/search/priceBasis'
 
 const Body = z.object({
   doc_price_item_id: z.string().uuid().optional(),
   doc_item_id: z.string().uuid().optional(),
   qty: z.number().positive().default(1),
+  requested_unit: z.string().nullable().optional(),
   review_confirmed: z.boolean().optional()
 })
 
@@ -35,9 +37,24 @@ export default defineEventHandler(async (event) => {
   if (body.doc_price_item_id) {
     const { data: dpi, error } = await client
       .from('doc_price_items')
-      .select('id, legacy_doc_item_id, document_id, product_text, sku_text, description_text, unit, normalized_price, source_page, documents:document_id(filename, vendor:vendor_id(name))')
+      .select('id, legacy_doc_item_id, document_id, product_text, sku_text, description_text, unit, normalized_price, moq, source_page, raw_cell_value, searchable_text, table_title, row_headers, column_headers, parent_headers, nearby_notes, section_breadcrumb, documents:document_id(filename, vendor:vendor_id(name))')
       .eq('id', body.doc_price_item_id).single()
     if (error || !dpi) throw createError({ statusCode: 404, statusMessage: 'doc_price_item not found' })
+    const rate = quotationRateForBasis(inferPriceBasis({
+      price: Number((dpi as any).normalized_price ?? 0),
+      unit: (dpi as any).unit,
+      moq: (dpi as any).moq,
+      raw_cell_value: (dpi as any).raw_cell_value,
+      searchable_text: (dpi as any).searchable_text,
+      description_text: (dpi as any).description_text,
+      product_text: (dpi as any).product_text,
+      table_title: (dpi as any).table_title,
+      row_headers: (dpi as any).row_headers,
+      column_headers: (dpi as any).column_headers,
+      parent_headers: (dpi as any).parent_headers,
+      nearby_notes: (dpi as any).nearby_notes,
+      section_breadcrumb: (dpi as any).section_breadcrumb
+    }), { value: body.qty, unit: body.requested_unit ?? null })
 
     line = {
       ...line,
@@ -46,9 +63,10 @@ export default defineEventHandler(async (event) => {
       source_document_id: (dpi as any).document_id,
       description: (dpi as any).description_text ?? (dpi as any).product_text ?? 'Priced item',
       sku: (dpi as any).sku_text,
-      unit: (dpi as any).unit,
+      unit: rate.unit,
       vendor: (dpi as any).documents?.vendor?.name ?? null,
-      unit_price: Number((dpi as any).normalized_price ?? 0),
+      qty: rate.qty,
+      unit_price: rate.unit_price,
       source_page: (dpi as any).source_page
     }
   } else if (body.doc_item_id) {
@@ -57,6 +75,12 @@ export default defineEventHandler(async (event) => {
       .select('id, raw_name, sku, unit, price, source_page, document_id, documents:document_id(filename, vendor:vendor_id(name))')
       .eq('id', body.doc_item_id).single()
     if (error || !di) throw createError({ statusCode: 404, statusMessage: 'doc_item not found' })
+    const rate = quotationRateForBasis(inferPriceBasis({
+      price: Number(di.price ?? 0),
+      unit: di.unit,
+      description_text: di.raw_name,
+      product_text: di.sku
+    }), { value: body.qty, unit: body.requested_unit ?? null })
 
     line = {
       ...line,
@@ -64,16 +88,18 @@ export default defineEventHandler(async (event) => {
       source_document_id: (di as any).document_id,
       description: di.raw_name,
       sku:         di.sku,
-      unit:        di.unit,
+      unit:        rate.unit,
       vendor:      (di as any).documents?.vendor?.name ?? null,
-      unit_price:  Number(di.price ?? 0),
+      qty:         rate.qty,
+      unit_price:  rate.unit_price,
       source_page: di.source_page
     }
   }
 
   const existing = await findExistingLine(client, quotationId, {
     doc_price_item_id: line.doc_price_item_id,
-    doc_item_id: line.doc_item_id
+    doc_item_id: line.doc_item_id,
+    unit: line.unit
   })
 
   if (existing) {
@@ -138,24 +164,28 @@ export default defineEventHandler(async (event) => {
 async function findExistingLine(
   client: Awaited<ReturnType<typeof userClient>>,
   quotationId: string,
-  source: { doc_price_item_id?: string | null; doc_item_id?: string | null }
+  source: { doc_price_item_id?: string | null; doc_item_id?: string | null; unit?: string | null }
 ) {
   if (source.doc_price_item_id) {
-    const { data } = await client
+    let query = client
       .from('quotation_items')
       .select('id, qty')
       .eq('quotation_id', quotationId)
       .eq('doc_price_item_id', source.doc_price_item_id)
+    query = source.unit ? query.eq('unit', source.unit) : query.is('unit', null)
+    const { data } = await query
       .maybeSingle()
     if (data) return data as any
   }
 
   if (source.doc_item_id) {
-    const { data } = await client
+    let query = client
       .from('quotation_items')
       .select('id, qty')
       .eq('quotation_id', quotationId)
       .eq('doc_item_id', source.doc_item_id)
+    query = source.unit ? query.eq('unit', source.unit) : query.is('unit', null)
+    const { data } = await query
       .maybeSingle()
     if (data) return data as any
   }

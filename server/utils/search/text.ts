@@ -72,6 +72,7 @@ export function parsePriceNumber(value: unknown): number | null {
 export function normalizeUnit(value: string | null | undefined): string | null {
   const text = normalizeSearchText(value)
   if (!text) return null
+  if (/\bbundle\b/.test(text)) return 'bundle'
   if (/\bcoil\b|\broll\b/.test(text)) return 'coil'
   if (/\b(?:meter|mtr|mtrs)\b/.test(text)) return 'meter'
   if (/\b(?:piece|pc|pcs|no|nos)\b/.test(text)) return 'piece'

@@ -24,8 +24,18 @@ interface CardItem {
   matched_column?: string | null
   match_explanation?: string | null
   suggested_query?: string | null
+  price_basis?: PriceBasis | null
   requested_quantity?: RequestedQuantity | null
   alternatives?: CandidateAlternative[]
+}
+interface PriceBasis {
+  source_price: number
+  source_basis_quantity: number
+  source_basis_unit: string | null
+  source_basis_pack_unit: string | null
+  source_basis_label: string | null
+  effective_unit_price: number
+  effective_unit: string | null
 }
 interface RequestedQuantity {
   value: number
@@ -45,6 +55,7 @@ interface CandidateAlternative {
   source_page: number | null
   confidence: number
   needs_review: boolean
+  price_basis?: PriceBasis | null
   suggested_query?: string | null
 }
 interface Message {
@@ -280,6 +291,7 @@ function alternativeAsCardItem(base: CardItem, alternative: CandidateAlternative
     match_explanation: alternative.needs_review
       ? 'Possible match: confirm before adding.'
       : 'Possible match from the uploaded document.',
+    price_basis: alternative.price_basis ?? null,
     requested_quantity: base.requested_quantity ?? null
   }
 }
@@ -315,8 +327,8 @@ async function addToQuotation(item: CardItem, quotationId: string | null) {
   await $fetch(`/api/quotations/${qid}/items`, {
     method: 'POST',
     body: item.doc_price_item_id
-      ? { doc_price_item_id: item.doc_price_item_id, qty: quoteQuantity(item), review_confirmed: !isQuoteReady(item) }
-      : { doc_item_id: item.doc_item_id, qty: quoteQuantity(item), review_confirmed: !isQuoteReady(item) }
+      ? { doc_price_item_id: item.doc_price_item_id, qty: quoteQuantity(item), requested_unit: item.requested_quantity?.unit ?? null, review_confirmed: !isQuoteReady(item) }
+      : { doc_item_id: item.doc_item_id, qty: quoteQuantity(item), requested_unit: item.requested_quantity?.unit ?? null, review_confirmed: !isQuoteReady(item) }
   })
   showAddMenu.value = null
   // Light toast via console for now
@@ -364,6 +376,16 @@ const quantityLabel = (item: Pick<CardItem, 'requested_quantity'>) =>
   item.requested_quantity
     ? `${new Intl.NumberFormat('en-IN').format(item.requested_quantity.value)} ${item.requested_quantity.unit ?? ''}`.trim()
     : null
+
+const sourceRateBasis = (item: Pick<CardItem, 'unit' | 'price_basis'>) =>
+  item.price_basis?.source_basis_label || item.unit || null
+
+const effectiveRateLabel = (item: Pick<CardItem, 'price' | 'currency' | 'price_basis'>) => {
+  const basis = item.price_basis
+  if (!basis?.effective_unit || !item.price) return null
+  if (basis.source_basis_quantity === 1 && basis.effective_unit_price === item.price) return null
+  return `${formatMoney(basis.effective_unit_price, item.currency)} / ${basis.effective_unit}`
+}
 
 const confidenceColor = (c: number) =>
   c >= 0.85 ? 'success' : c >= 0.6 ? 'warning' : 'neutral'
@@ -477,8 +499,13 @@ async function onDocumentsUploaded() {
 
               <div class="mt-3 flex items-baseline gap-2">
                 <span class="text-xl font-semibold tabular-nums">{{ formatMoney(it.price, it.currency) }}</span>
-                <span class="text-xs text-muted">{{ it.unit ?? 'unit not stated' }}</span>
+                <span class="text-xs text-muted">
+                  {{ sourceRateBasis(it) ? `/ ${sourceRateBasis(it)}` : 'unit not stated' }}
+                </span>
               </div>
+              <p v-if="effectiveRateLabel(it)" class="mt-1 text-xs font-medium text-toned">
+                Effective rate: {{ effectiveRateLabel(it) }}
+              </p>
               <p v-if="quantityLabel(it)" class="mt-1 text-xs text-muted">
                 Requested quantity: {{ quantityLabel(it) }}
               </p>
@@ -529,7 +556,12 @@ async function onDocumentsUploaded() {
                     <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
                       <span class="font-medium tabular-nums">
                         {{ formatMoney(alt.price, alt.currency) }}
-                        <span class="font-normal text-muted">{{ alt.unit ?? '' }}</span>
+                        <span class="font-normal text-muted">
+                          {{ sourceRateBasis(alt) ? `/ ${sourceRateBasis(alt)}` : '' }}
+                        </span>
+                      </span>
+                      <span v-if="effectiveRateLabel(alt)" class="text-xs text-muted">
+                        Effective {{ effectiveRateLabel(alt) }}
                       </span>
                       <UDropdownMenu
                         v-if="alt.confidence >= 0.65"

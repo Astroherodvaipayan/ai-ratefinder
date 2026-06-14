@@ -1,10 +1,13 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { inferPriceBasis, quotationRateForBasis, type RequestedQuantityLike } from './search/priceBasis'
 
 interface ChatWithQuotation {
   id: string
   title: string
   quotation_id: string | null
 }
+
+type QuantitySelection = number | RequestedQuantityLike
 
 function proformaTitle(seed: string): string {
   const title = seed.trim().replace(/\s+/g, ' ').slice(0, 80)
@@ -57,7 +60,7 @@ export async function addDocItemsToQuotation(
   client: SupabaseClient,
   quotationId: string,
   docItemIds: string[],
-  quantitiesById: Map<string, number> = new Map()
+  quantitiesById: Map<string, QuantitySelection> = new Map()
 ): Promise<number> {
   const orderedIds = [...new Set(docItemIds)].filter(Boolean)
   if (!orderedIds.length) return 0
@@ -89,6 +92,12 @@ export async function addDocItemsToQuotation(
     const item: any = itemById.get(id)
     if (!item) return []
     nextLineNo += 1
+    const rate = quotationRateForBasis(inferPriceBasis({
+      price: Number(item.price ?? 0),
+      unit: item.unit,
+      description_text: item.raw_name,
+      product_text: item.sku
+    }), quantitySelection(quantitiesById.get(item.id)))
     return [{
       quotation_id: quotationId,
       doc_item_id: item.id,
@@ -96,10 +105,10 @@ export async function addDocItemsToQuotation(
       line_no: nextLineNo,
       description: item.raw_name,
       sku: item.sku,
-      unit: item.unit,
+      unit: rate.unit,
       vendor: item.documents?.vendor?.name ?? null,
-      qty: quantitiesById.get(item.id) ?? 1,
-      unit_price: Number(item.price ?? 0),
+      qty: rate.qty,
+      unit_price: rate.unit_price,
       source_page: item.source_page
     }]
   })
@@ -121,7 +130,7 @@ export async function addPriceItemsToQuotation(
   client: SupabaseClient,
   quotationId: string,
   docPriceItemIds: string[],
-  quantitiesById: Map<string, number> = new Map()
+  quantitiesById: Map<string, QuantitySelection> = new Map()
 ): Promise<number> {
   const orderedIds = [...new Set(docPriceItemIds)].filter(Boolean)
   if (!orderedIds.length) return 0
@@ -141,7 +150,7 @@ export async function addPriceItemsToQuotation(
 
   const { data: priceItems, error } = await client
     .from('doc_price_items')
-    .select('id, legacy_doc_item_id, document_id, product_text, sku_text, description_text, unit, normalized_price, currency, moq, source_page, documents:document_id(filename, vendor:vendor_id(name))')
+    .select('id, legacy_doc_item_id, document_id, product_text, sku_text, description_text, unit, normalized_price, currency, moq, source_page, raw_cell_value, searchable_text, table_title, row_headers, column_headers, parent_headers, nearby_notes, section_breadcrumb, documents:document_id(filename, vendor:vendor_id(name))')
     .in('id', nextIds)
   if (error) throw createError({ statusCode: 500, statusMessage: error.message })
 
@@ -153,6 +162,21 @@ export async function addPriceItemsToQuotation(
     const item: any = itemById.get(id)
     if (!item) return []
     nextLineNo += 1
+    const rate = quotationRateForBasis(inferPriceBasis({
+      price: Number(item.normalized_price ?? 0),
+      unit: item.unit,
+      moq: item.moq,
+      raw_cell_value: item.raw_cell_value,
+      searchable_text: item.searchable_text,
+      description_text: item.description_text,
+      product_text: item.product_text,
+      table_title: item.table_title,
+      row_headers: item.row_headers,
+      column_headers: item.column_headers,
+      parent_headers: item.parent_headers,
+      nearby_notes: item.nearby_notes,
+      section_breadcrumb: item.section_breadcrumb
+    }), quantitySelection(quantitiesById.get(item.id)))
     return [{
       quotation_id: quotationId,
       doc_price_item_id: item.id,
@@ -161,10 +185,10 @@ export async function addPriceItemsToQuotation(
       line_no: nextLineNo,
       description: item.description_text || item.product_text || 'Priced item',
       sku: item.sku_text,
-      unit: item.unit,
+      unit: rate.unit,
       vendor: item.documents?.vendor?.name ?? null,
-      qty: quantitiesById.get(item.id) ?? 1,
-      unit_price: Number(item.normalized_price ?? 0),
+      qty: rate.qty,
+      unit_price: rate.unit_price,
       source_page: item.source_page
     }]
   })
@@ -180,4 +204,9 @@ export async function addPriceItemsToQuotation(
     .eq('id', quotationId)
 
   return lines.length
+}
+
+function quantitySelection(selection: QuantitySelection | undefined): RequestedQuantityLike | null {
+  if (typeof selection === 'number') return { value: selection, unit: null }
+  return selection ?? null
 }

@@ -4,6 +4,7 @@ import { normalizeAliases } from './normalizeAliases'
 import { parseUserItemQuery, splitItemQueries } from './parseUserItemQuery'
 import { explainMatch } from './explainMatch'
 import { scoreCandidates, type ScoredCandidate } from './scoreCandidates'
+import { inferPriceBasis, type PriceBasisSummary } from './priceBasis'
 
 export interface SearchItemsResult {
   answer_text: string
@@ -27,6 +28,7 @@ export interface SearchItemsResult {
     matched_column?: string | null
     match_explanation?: string | null
     requested_quantity?: RequestedQuantitySummary | null
+    price_basis?: PriceBasisSummary
     suggested_query?: string | null
     alternatives?: PriceCandidateSummary[]
   }>
@@ -52,6 +54,7 @@ export interface PriceCandidateSummary {
   vendor: string | null
   sku: string | null
   needs_review: boolean
+  price_basis?: PriceBasisSummary
   suggested_query?: string | null
 }
 
@@ -85,6 +88,7 @@ function pricedItemFromScore(
   requestedQuantity: RequestedQuantitySummary | null = null
 ): SearchItemsResult['priced_items'][number] {
   const c = scored.candidate
+  const priceBasis = priceBasisFromScore(scored)
   return {
     query,
     doc_price_item_id: c.doc_price_item_id,
@@ -105,6 +109,7 @@ function pricedItemFromScore(
     matched_column: c.column_headers.join(' ') || null,
     match_explanation: readableMatchExplanation(scored),
     requested_quantity: requestedQuantity,
+    price_basis: priceBasis,
     suggested_query: suggestedQuery(scored),
     alternatives: closest(alternatives)
   }
@@ -140,8 +145,28 @@ function closest(scored: ScoredCandidate[]): PriceCandidateSummary[] {
     vendor: item.candidate.vendor,
     sku: item.candidate.sku_text,
     needs_review: item.needs_review,
+    price_basis: priceBasisFromScore(item),
     suggested_query: suggestedQuery(item)
   }))
+}
+
+function priceBasisFromScore(item: ScoredCandidate) {
+  const c = item.candidate
+  return inferPriceBasis({
+    price: c.normalized_price,
+    unit: c.unit,
+    moq: c.moq,
+    raw_cell_value: c.raw_cell_value,
+    searchable_text: c.searchable_text,
+    description_text: c.description_text,
+    product_text: c.product_text,
+    table_title: c.table_title,
+    row_headers: c.row_headers,
+    column_headers: c.column_headers,
+    parent_headers: c.parent_headers,
+    nearby_notes: c.nearby_notes,
+    section_breadcrumb: c.section_breadcrumb
+  })
 }
 
 function suggestedQuery(item: ScoredCandidate) {
