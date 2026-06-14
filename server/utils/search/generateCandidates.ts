@@ -212,7 +212,7 @@ async function canonicalCandidates(
   limit: number
 ) {
   const { data, error } = await client.rpc('rf_search_price_items', {
-    q: parsed.normalized_query || parsed.raw_query,
+    q: parsed.normalized_match_query || parsed.normalized_query || parsed.raw_query,
     lim: limit,
     tenant: filters.tenantId,
     filter_vendor: filters.vendorId ?? null,
@@ -223,8 +223,8 @@ async function canonicalCandidates(
     throw createError({ statusCode: 500, statusMessage: error.message })
   }
   const rpcCandidates = (data ?? []).map((row: any) => normalizeRpcCandidate(row, 'canonical_sql'))
-  if (rpcCandidates.length) return rpcCandidates
-  return canonicalDirectCandidates(client, parsed, filters, limit)
+  const directCandidates = await canonicalDirectCandidates(client, parsed, filters, limit)
+  return dedupe([...rpcCandidates, ...directCandidates]).slice(0, limit)
 }
 
 async function canonicalDirectCandidates(
@@ -272,6 +272,24 @@ async function canonicalDirectCandidates(
     }
     const { data, error } = await query
     if (!error) addRows(data as any[], 0.9)
+  }
+
+  for (const hint of parsed.attribute_hints.slice(0, 4)) {
+    const numeric = Number(hint.value)
+    const variants = [
+      { name: hint.name, value: hint.value, ...(hint.unit ? { unit: hint.unit } : {}) },
+      { name: hint.name, value: String(numeric), ...(hint.unit ? { unit: hint.unit } : {}) },
+      { name: hint.name, value: Number.isFinite(numeric) ? numeric.toFixed(2) : hint.value, ...(hint.unit ? { unit: hint.unit } : {}) },
+      { name: hint.name, value: hint.value },
+      { name: hint.name, value: String(numeric) },
+      { name: hint.name, value: Number.isFinite(numeric) ? numeric.toFixed(2) : hint.value }
+    ].filter(item => item.value && item.value !== 'NaN')
+    for (const variant of variants) {
+      const { data, error } = await runBaseQuery()
+        .contains('attributes_json', JSON.stringify([variant]))
+        .limit(Math.max(limit, 120))
+      if (!error) addRows(data as any[], 0.82)
+    }
   }
 
   if (usefulTerms.length) {

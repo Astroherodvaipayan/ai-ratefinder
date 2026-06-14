@@ -29,6 +29,12 @@ export const ChatItem = z.object({
   matched_row: z.string().nullable().optional(),
   matched_column: z.string().nullable().optional(),
   match_explanation: z.string().nullable().optional(),
+  suggested_query: z.string().nullable().optional(),
+  requested_quantity: z.object({
+    value: z.number(),
+    unit: z.string().nullable(),
+    raw: z.string()
+  }).nullable().optional(),
   alternatives: z.array(z.object({
     doc_item_id: z.string().uuid().nullable(),
     doc_price_item_id: z.string().uuid().nullable().optional(),
@@ -41,7 +47,8 @@ export const ChatItem = z.object({
     source_document: z.string(),
     source_page: z.number().int().nullable(),
     confidence: z.number().min(0).max(1),
-    needs_review: z.boolean()
+    needs_review: z.boolean(),
+    suggested_query: z.string().nullable().optional()
   })).optional()
 })
 export type ChatItem = z.infer<typeof ChatItem>

@@ -137,17 +137,17 @@ function buildCellsFromGrid(params: {
       if (!raw) continue
       const columnHeaders = uniqueText(params.grid
         .slice(0, headerRows)
-        .map(headerRow => headerRow[colIndex]))
+        .map(headerRow => headerCellAt(headerRow, colIndex)))
       const descriptorCol = nearestDescriptorColumn(descriptorColumns, colIndex)
       const rowDescriptor = descriptorCol === null ? firstCell : cellText(row[descriptorCol])
       const descriptorHeaders = descriptorCol === null
         ? []
-        : uniqueText(params.grid.slice(0, headerRows).map(headerRow => headerRow[descriptorCol]))
+        : uniqueText(params.grid.slice(0, headerRows).map(headerRow => headerCellAt(headerRow, descriptorCol)))
       const rowHeaders = rowIndex >= headerRows
         ? uniqueText([rowDescriptor || firstCell || rowCarry[0]])
         : []
       const parentHeaders = uniqueText([
-        ...params.grid.slice(0, Math.max(0, headerRows - 1)).map(headerRow => headerRow[colIndex]),
+        ...params.grid.slice(0, Math.max(0, headerRows - 1)).map(headerRow => headerCellAt(headerRow, colIndex)),
         rowIndex >= headerRows ? rowDescriptor || params.grid[rowIndex]?.[0] : null
       ])
       const headerContext = [...columnHeaders, ...rowHeaders, ...parentHeaders]
@@ -183,6 +183,16 @@ function buildCellsFromGrid(params: {
     }
   }
   return cells
+}
+
+function headerCellAt(row: string[], colIndex: number) {
+  const direct = cellText(row[colIndex])
+  if (direct) return direct
+  for (let index = colIndex - 1; index >= 0; index--) {
+    const carried = cellText(row[index])
+    if (carried) return carried
+  }
+  return ''
 }
 
 function inferDescriptorColumns(grid: string[][], headerRows: number) {

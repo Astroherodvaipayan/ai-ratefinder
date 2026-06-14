@@ -190,6 +190,17 @@ export function scoreCandidate(params: {
     if (attrs.conflicting.length) conflicting_fields.push(...attrs.conflicting.map(value => `attribute:${value}`))
   }
 
+  const sizeHint = parsed.attribute_hints.find(hint => hint.name === 'size')
+  const candidateSize = candidate.attributes_json.find(attr => attr.name === 'size')
+  if (sizeHint && candidateSize && Number(sizeHint.value) !== Number(candidateSize.value)) {
+    const querySize = Number(sizeHint.value)
+    const rowSize = Number(candidateSize.value)
+    if (Number.isFinite(querySize) && Number.isFinite(rowSize)) {
+      const distanceRatio = Math.abs(querySize - rowSize) / Math.max(querySize, rowSize, 1)
+      score += Math.max(0, 0.08 - distanceRatio * 0.1)
+    }
+  }
+
   if (parsed.requested_unit) {
     const candidateUnit = normalizeUnit(candidate.unit)
     const requestedUnit = normalizeUnit(parsed.requested_unit)
@@ -257,7 +268,8 @@ export function scoreCandidate(params: {
   score += WEIGHTS.recency * recencyBoost(candidate)
   score += WEIGHTS.recall * Math.max(0, Math.min(1, candidate.recall_score))
 
-  const queryIdentityTokens = uniqueIdentityTokens(identityTokens(parsed.normalized_query))
+  const scoringQuery = parsed.normalized_match_query || parsed.normalized_query
+  const queryIdentityTokens = uniqueIdentityTokens(identityTokens(scoringQuery))
   const candidateIdentityTokens = uniqueIdentityTokens(identityTokens(candidateIdentityText))
   if (parsed.product_terms.length && queryIdentityTokens.length >= 3) {
     const matchedIdentity = queryIdentityTokens.filter(token => tokenAwareMatch(candidateIdentityText, token))
@@ -287,7 +299,7 @@ export function scoreCandidate(params: {
     }
   }
 
-  const queryNumericIdentityTokens = uniqueIdentityTokens(numericIdentityTokens(parsed.normalized_query))
+  const queryNumericIdentityTokens = uniqueIdentityTokens(numericIdentityTokens(scoringQuery))
   if (queryNumericIdentityTokens.length >= 2) {
     const matchedNumericIdentity = queryNumericIdentityTokens.filter(token => tokenAwareMatch(candidateIdentityText, token))
     const numericIdentityRatio = matchedNumericIdentity.length / queryNumericIdentityTokens.length
@@ -336,6 +348,22 @@ export function scoreCandidate(params: {
   if (/\bper meter\b/.test(normalizeSearchText(parsed.normalized_query)) && /\bcoil\b/.test(candidateIdentityText)) {
     score -= 0.12
     conflicting_fields.push('unit:coil')
+  }
+  if (parsed.product_terms.some(term => /^(?:armoured|armored)$/.test(term)) && !tokenAwareMatch(candidateIdentityText, 'armoured')) {
+    score = Math.min(score, 0.64)
+    missing_fields.push('terms:armoured')
+  }
+  if (parsed.product_terms.includes('copper') && tokenAwareMatch(candidateIdentityText, 'aluminium') && !tokenAwareMatch(candidateIdentityText, 'copper')) {
+    score = Math.min(score, 0.64)
+    conflicting_fields.push('material:aluminium')
+  }
+  if (parsed.product_terms.includes('aluminium') && tokenAwareMatch(candidateIdentityText, 'copper') && !tokenAwareMatch(candidateIdentityText, 'aluminium')) {
+    score = Math.min(score, 0.64)
+    conflicting_fields.push('material:copper')
+  }
+  if (!parsed.product_terms.some(term => term === 'speaker') && tokenAwareMatch(candidateIdentityText, 'speaker')) {
+    score -= 0.6
+    conflicting_fields.push('product:speaker')
   }
   score -= params.duplicatePenalty ?? 0
   score = Math.max(0, Math.min(1, Number(score.toFixed(4))))

@@ -23,7 +23,14 @@ interface CardItem {
   matched_row?: string | null
   matched_column?: string | null
   match_explanation?: string | null
+  suggested_query?: string | null
+  requested_quantity?: RequestedQuantity | null
   alternatives?: CandidateAlternative[]
+}
+interface RequestedQuantity {
+  value: number
+  unit: string | null
+  raw: string
 }
 interface CandidateAlternative {
   doc_item_id: string | null
@@ -38,6 +45,7 @@ interface CandidateAlternative {
   source_page: number | null
   confidence: number
   needs_review: boolean
+  suggested_query?: string | null
 }
 interface Message {
   id: string; role: 'user' | 'assistant'
@@ -271,8 +279,15 @@ function alternativeAsCardItem(base: CardItem, alternative: CandidateAlternative
     matched_column: null,
     match_explanation: alternative.needs_review
       ? 'Possible match: confirm before adding.'
-      : 'Possible match from the uploaded document.'
+      : 'Possible match from the uploaded document.',
+    requested_quantity: base.requested_quantity ?? null
   }
+}
+
+function quoteQuantity(item: Pick<CardItem, 'requested_quantity'>) {
+  return item.requested_quantity?.value && Number.isFinite(item.requested_quantity.value)
+    ? item.requested_quantity.value
+    : 1
 }
 
 async function addToQuotation(item: CardItem, quotationId: string | null) {
@@ -300,8 +315,8 @@ async function addToQuotation(item: CardItem, quotationId: string | null) {
   await $fetch(`/api/quotations/${qid}/items`, {
     method: 'POST',
     body: item.doc_price_item_id
-      ? { doc_price_item_id: item.doc_price_item_id, qty: 1, review_confirmed: !isQuoteReady(item) }
-      : { doc_item_id: item.doc_item_id, qty: 1, review_confirmed: !isQuoteReady(item) }
+      ? { doc_price_item_id: item.doc_price_item_id, qty: quoteQuantity(item), review_confirmed: !isQuoteReady(item) }
+      : { doc_item_id: item.doc_item_id, qty: quoteQuantity(item), review_confirmed: !isQuoteReady(item) }
   })
   showAddMenu.value = null
   // Light toast via console for now
@@ -344,6 +359,11 @@ const sourceLabel = (item: CardItem) =>
   [item.source_document, item.source_page ? `p.${item.source_page}` : null]
     .filter(Boolean)
     .join(' · ') || '—'
+
+const quantityLabel = (item: Pick<CardItem, 'requested_quantity'>) =>
+  item.requested_quantity
+    ? `${new Intl.NumberFormat('en-IN').format(item.requested_quantity.value)} ${item.requested_quantity.unit ?? ''}`.trim()
+    : null
 
 const confidenceColor = (c: number) =>
   c >= 0.85 ? 'success' : c >= 0.6 ? 'warning' : 'neutral'
@@ -447,7 +467,7 @@ async function onDocumentsUploaded() {
                 <h3 class="min-w-0 text-sm font-medium leading-5">{{ it.product_name }}</h3>
                 <div class="flex shrink-0 flex-col items-end gap-1">
                   <UBadge v-if="it.needs_review" :color="confidenceColor(it.confidence)" variant="soft" size="xs">
-                    {{ (it.confidence * 100).toFixed(0) }}%
+                    Review
                   </UBadge>
                   <UBadge :color="it.needs_review ? 'warning' : 'success'" variant="subtle" size="xs">
                     {{ statusLabel(it) }}
@@ -459,6 +479,9 @@ async function onDocumentsUploaded() {
                 <span class="text-xl font-semibold tabular-nums">{{ formatMoney(it.price, it.currency) }}</span>
                 <span class="text-xs text-muted">{{ it.unit ?? 'unit not stated' }}</span>
               </div>
+              <p v-if="quantityLabel(it)" class="mt-1 text-xs text-muted">
+                Requested quantity: {{ quantityLabel(it) }}
+              </p>
 
               <p
                 v-if="it.needs_review"
@@ -480,6 +503,8 @@ async function onDocumentsUploaded() {
                 </dd>
                 <dt v-if="it.match_explanation" class="text-muted">Note</dt>
                 <dd v-if="it.match_explanation" class="min-w-0 break-words">{{ it.match_explanation }}</dd>
+                <dt v-if="it.needs_review && it.suggested_query" class="text-muted">Did you mean</dt>
+                <dd v-if="it.needs_review && it.suggested_query" class="min-w-0 break-words">{{ it.suggested_query }}</dd>
               </dl>
 
               <details
@@ -525,6 +550,9 @@ async function onDocumentsUploaded() {
                     </div>
                     <p class="mt-1 text-muted">
                       {{ [alt.vendor, alt.source_document, alt.source_page ? `p.${alt.source_page}` : null].filter(Boolean).join(' · ') || 'Source not stated' }}
+                    </p>
+                    <p v-if="alt.suggested_query" class="mt-1 text-muted">
+                      Did you mean: {{ alt.suggested_query }}
                     </p>
                   </div>
                 </div>

@@ -56,7 +56,8 @@ export async function ensureChatQuotation(
 export async function addDocItemsToQuotation(
   client: SupabaseClient,
   quotationId: string,
-  docItemIds: string[]
+  docItemIds: string[],
+  quantitiesById: Map<string, number> = new Map()
 ): Promise<number> {
   const orderedIds = [...new Set(docItemIds)].filter(Boolean)
   if (!orderedIds.length) return 0
@@ -97,7 +98,7 @@ export async function addDocItemsToQuotation(
       sku: item.sku,
       unit: item.unit,
       vendor: item.documents?.vendor?.name ?? null,
-      qty: 1,
+      qty: quantitiesById.get(item.id) ?? 1,
       unit_price: Number(item.price ?? 0),
       source_page: item.source_page
     }]
@@ -119,7 +120,8 @@ export async function addDocItemsToQuotation(
 export async function addPriceItemsToQuotation(
   client: SupabaseClient,
   quotationId: string,
-  docPriceItemIds: string[]
+  docPriceItemIds: string[],
+  quantitiesById: Map<string, number> = new Map()
 ): Promise<number> {
   const orderedIds = [...new Set(docPriceItemIds)].filter(Boolean)
   if (!orderedIds.length) return 0
@@ -161,7 +163,7 @@ export async function addPriceItemsToQuotation(
       sku: item.sku_text,
       unit: item.unit,
       vendor: item.documents?.vendor?.name ?? null,
-      qty: 1,
+      qty: quantitiesById.get(item.id) ?? 1,
       unit_price: Number(item.normalized_price ?? 0),
       source_page: item.source_page
     }]

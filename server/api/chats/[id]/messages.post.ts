@@ -64,6 +64,8 @@ export default defineEventHandler(async (event) => {
     matched_row: item.matched_row ?? null,
     matched_column: item.matched_column ?? null,
     match_explanation: item.match_explanation ?? null,
+    suggested_query: item.suggested_query ?? null,
+    requested_quantity: item.requested_quantity ?? null,
     alternatives: item.alternatives ?? []
   }))
 
@@ -74,12 +76,18 @@ export default defineEventHandler(async (event) => {
     const canonicalIds = highConfidence
       .map(item => item.doc_price_item_id)
       .filter((id): id is string => Boolean(id))
-    if (canonicalIds.length) await addPriceItemsToQuotation(client, quotationId, canonicalIds)
+    const canonicalQuantities = new Map(highConfidence
+      .filter(item => item.doc_price_item_id && item.requested_quantity?.value)
+      .map(item => [item.doc_price_item_id!, item.requested_quantity!.value]))
+    if (canonicalIds.length) await addPriceItemsToQuotation(client, quotationId, canonicalIds, canonicalQuantities)
 
     const legacyIds = highConfidence
       .filter(item => !item.doc_price_item_id && item.doc_item_id)
       .map(item => item.doc_item_id!)
-    if (legacyIds.length) await addDocItemsToQuotation(client, quotationId, legacyIds)
+    const legacyQuantities = new Map(highConfidence
+      .filter(item => !item.doc_price_item_id && item.doc_item_id && item.requested_quantity?.value)
+      .map(item => [item.doc_item_id!, item.requested_quantity!.value]))
+    if (legacyIds.length) await addDocItemsToQuotation(client, quotationId, legacyIds, legacyQuantities)
   }
 
   await persistMatchLogs(client, user.id, deterministic, highConfidence)

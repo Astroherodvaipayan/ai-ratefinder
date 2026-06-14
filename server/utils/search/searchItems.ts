@@ -26,11 +26,14 @@ export interface SearchItemsResult {
     matched_row?: string | null
     matched_column?: string | null
     match_explanation?: string | null
+    requested_quantity?: RequestedQuantitySummary | null
+    suggested_query?: string | null
     alternatives?: PriceCandidateSummary[]
   }>
   unresolved_items: Array<{
     query: string
     reason: string
+    did_you_mean?: string | null
     closest_candidates: PriceCandidateSummary[]
   }>
   explanations: ReturnType<typeof explainMatch>[]
@@ -49,6 +52,13 @@ export interface PriceCandidateSummary {
   vendor: string | null
   sku: string | null
   needs_review: boolean
+  suggested_query?: string | null
+}
+
+export interface RequestedQuantitySummary {
+  value: number
+  unit: string | null
+  raw: string
 }
 
 async function mapWithConcurrency<T, R>(
@@ -71,7 +81,8 @@ async function mapWithConcurrency<T, R>(
 function pricedItemFromScore(
   query: string,
   scored: ScoredCandidate,
-  alternatives: ScoredCandidate[] = []
+  alternatives: ScoredCandidate[] = [],
+  requestedQuantity: RequestedQuantitySummary | null = null
 ): SearchItemsResult['priced_items'][number] {
   const c = scored.candidate
   return {
@@ -93,6 +104,8 @@ function pricedItemFromScore(
     matched_row: c.row_headers.join(' ') || null,
     matched_column: c.column_headers.join(' ') || null,
     match_explanation: readableMatchExplanation(scored),
+    requested_quantity: requestedQuantity,
+    suggested_query: suggestedQuery(scored),
     alternatives: closest(alternatives)
   }
 }
@@ -126,8 +139,40 @@ function closest(scored: ScoredCandidate[]): PriceCandidateSummary[] {
     source_document: item.candidate.source_document,
     vendor: item.candidate.vendor,
     sku: item.candidate.sku_text,
-    needs_review: item.needs_review
+    needs_review: item.needs_review,
+    suggested_query: suggestedQuery(item)
   }))
+}
+
+function suggestedQuery(item: ScoredCandidate) {
+  const c = item.candidate
+  const tableTitle = normalizeForSuggestion(c.table_title)
+  const columnHeaders = c.column_headers
+    .map(normalizeForSuggestion)
+    .filter(Boolean)
+    .filter(header => !/^(?:rate|price|mrp|amount)$/i.test(header))
+    .filter(header => header !== tableTitle)
+  const signalHeaders = columnHeaders.filter(header =>
+    /\b(?:armou?red|aluminium|copper|fr|frls|frlsh|hffr|core|coil|jelly|speaker|unarmou?red)\b/i.test(header)
+  )
+  const parts = [
+    c.row_headers.join(' '),
+    ...(signalHeaders.length ? signalHeaders : columnHeaders.slice(-2)),
+    signalHeaders.length ? null : tableTitle
+  ].filter(Boolean).join(' ')
+  return parts.replace(/\s+/g, ' ').trim() || null
+}
+
+function normalizeForSuggestion(value: string | null | undefined) {
+  return (value ?? '')
+    .replace(/\b(?:confirming|conforming)\s+to\s+IS:?[\s\S]*$/i, '')
+    .replace(/\bwith\s+Flexible\s+Bright[\s\S]*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function requestedQuantityFor(parsed: { requested_quantities?: RequestedQuantitySummary[] }) {
+  return parsed.requested_quantities?.[0] ?? null
 }
 
 function answerText(result: Pick<SearchItemsResult, 'priced_items' | 'unresolved_items'>) {
@@ -136,14 +181,32 @@ function answerText(result: Pick<SearchItemsResult, 'priced_items' | 'unresolved
   const unresolved = result.unresolved_items.length
   const parts: string[] = []
   if (matched) parts.push(`Matched ${matched} source-backed item${matched === 1 ? '' : 's'}.`)
-  if (review) parts.push(`${review} item${review === 1 ? ' needs' : 's need'} review before quotation.`)
+  if (review) {
+    const reviewExamples = result.priced_items
+      .filter(item => item.needs_review)
+      .slice(0, 3)
+      .map(item => item.suggested_query
+        ? `${item.query} -> did you mean ${item.suggested_query} at ${item.price} ${item.currency}`
+        : item.query)
+      .join('; ')
+    parts.push(`${review} item${review === 1 ? ' needs' : 's need'} review before quotation${reviewExamples ? `. Did you mean: ${reviewExamples}` : ''}.`)
+  }
   if (unresolved) {
     const examples = result.unresolved_items
       .slice(0, 5)
-      .map(item => item.query)
+      .map(item => {
+        const suggestions = item.closest_candidates
+          .slice(0, 3)
+          .flatMap(candidate => candidate.suggested_query
+            ? [`${candidate.suggested_query} at ${candidate.price} ${candidate.currency}`]
+            : [])
+        return suggestions.length
+          ? `${item.query} -> did you mean ${suggestions.join(' OR ')}`
+          : item.query
+      })
       .join('; ')
     parts.push(
-      `Skipped ${unresolved} line${unresolved === 1 ? '' : 's'} because no source-backed price was safe enough to quote${examples ? `: ${examples}${unresolved > 5 ? '; ...' : ''}` : ''}.`
+      `Needs clarification for ${unresolved} line${unresolved === 1 ? '' : 's'}; no source-backed price was safe enough to quote automatically${examples ? `. Did you mean: ${examples}${unresolved > 5 ? '; ...' : ''}` : ''}.`
     )
   }
   return parts.join(' ') || 'No reliable priced records were found.'
@@ -194,7 +257,12 @@ export async function searchItems(params: {
 
   const priced_items = perQuery.flatMap(item => {
     if (!item.best || item.best.score < 0.65) return []
-    return [pricedItemFromScore(item.query, item.best, item.scored.slice(1, 6))]
+    return [pricedItemFromScore(
+      item.query,
+      item.best,
+      item.scored.slice(1, 6),
+      requestedQuantityFor(item.parsed)
+    )]
   })
 
   const unresolved_items = perQuery.flatMap(item => {
@@ -204,6 +272,7 @@ export async function searchItems(params: {
       reason: item.scored.length
         ? 'Closest records did not meet the deterministic confidence threshold.'
         : 'No indexed price records matched this query.',
+      did_you_mean: item.scored[0] ? suggestedQuery(item.scored[0]) : null,
       closest_candidates: closest(item.scored)
     }]
   })
