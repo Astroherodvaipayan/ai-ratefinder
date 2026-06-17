@@ -3,6 +3,7 @@ definePageMeta({ layout: 'default' })
 
 interface Vendor {
   id: string
+  owner_id: string
   name: string
   notes: string | null
   created_at: string
@@ -19,6 +20,7 @@ interface Doc {
 
 const { data: vendors, refresh: refreshVendors } = useFetch<Vendor[]>('/api/vendors', { default: () => [], lazy: true })
 const { data: docs, refresh: refreshDocs } = useFetch<Doc[]>('/api/documents', { default: () => [], lazy: true })
+const user = useSupabaseUser()
 
 const name = ref('')
 const deletingId = ref<string | null>(null)
@@ -39,6 +41,7 @@ const iconChoices = [
 const folders = computed(() => {
   const known = vendors.value.map(vendor => ({
     id: vendor.id,
+    owner_id: vendor.owner_id,
     name: vendor.name,
     notes: vendor.notes,
     docs: docs.value.filter(doc => doc.vendor?.id === vendor.id)
@@ -63,16 +66,23 @@ function setIcon(vendorId: string, icon: string) {
   saveIcons()
 }
 
+function canDeleteVendor(folder: { id: string; owner_id?: string }) {
+  return Boolean(folder.id !== 'unassigned' && folder.owner_id && user.value?.id === folder.owner_id)
+}
+
 async function add() {
   if (!name.value.trim()) return
   const created = await $fetch<Vendor>('/api/vendors', { method: 'POST', body: { name: name.value.trim() } })
-  vendors.value = [created, ...vendors.value]
+  vendors.value = [
+    created,
+    ...vendors.value.filter(vendor => vendor.id !== created.id)
+  ]
   name.value = ''
   void Promise.all([refreshVendors(), refreshDocs()])
 }
 
-async function deleteVendor(folder: { id: string; name: string; docs: Doc[] }) {
-  if (folder.id === 'unassigned' || deletingId.value) return
+async function deleteVendor(folder: { id: string; owner_id?: string; name: string; docs: Doc[] }) {
+  if (!canDeleteVendor(folder) || deletingId.value) return
 
   const suffix = folder.docs.length
     ? ` ${folder.docs.length} document${folder.docs.length === 1 ? '' : 's'} will move to Unassigned.`
@@ -149,7 +159,7 @@ onMounted(() => {
 
             <div class="flex shrink-0 items-center gap-1">
               <UButton
-                v-if="folder.id !== 'unassigned'"
+                v-if="canDeleteVendor(folder)"
                 size="xs"
                 variant="soft"
                 icon="i-lucide-upload"

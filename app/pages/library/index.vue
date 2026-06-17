@@ -9,12 +9,13 @@ import { uploadDocumentDirect } from '~/utils/directDocumentUpload'
 definePageMeta({ layout: 'default' })
 
 interface Doc {
-  id: string; filename: string; mime: string | null; size: number | null
+  id: string; owner_id: string; filename: string; mime: string | null; size: number | null
   status: string; page_count: number | null; error: string | null
   created_at: string; item_count: number; parsed_with_internal?: boolean
   vendor: { id: string; name: string } | null
 }
 
+const user = useSupabaseUser()
 const { data: docs, refresh } = useFetch<Doc[]>('/api/documents', { default: () => [], lazy: true })
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -77,6 +78,10 @@ function statusText(status: string) {
   return status
 }
 
+function canManageDocument(doc: Pick<Doc, 'owner_id'>) {
+  return Boolean(user.value?.id && doc.owner_id === user.value.id)
+}
+
 async function uploadOneFile(file: File): Promise<void> {
   if (file.size > MAX_DOCUMENT_UPLOAD_BYTES) {
     throw new Error(documentUploadSizeError(file.name, file.size))
@@ -134,6 +139,10 @@ async function uploadFiles(files: FileList | File[]) {
 }
 
 async function reparseDocument(doc: Doc) {
+  if (!canManageDocument(doc)) {
+    reparseError.value = 'Only the uploader can reparse this shared document.'
+    return
+  }
   if (reparsingIds.value.includes(doc.id)) return
   reparseError.value = null
   reparsingIds.value = [...reparsingIds.value, doc.id]
@@ -149,6 +158,10 @@ async function reparseDocument(doc: Doc) {
 }
 
 async function editDocumentVendor(doc: Doc) {
+  if (!canManageDocument(doc)) {
+    vendorEditError.value = 'Only the uploader can edit this shared document.'
+    return
+  }
   if (savingVendorIds.value.includes(doc.id)) return
   vendorEditError.value = null
   const nextName = prompt('Vendor name', doc.vendor?.name ?? '')?.trim()
@@ -325,6 +338,7 @@ onBeforeUnmount(() => {
                 </div>
                 </NuxtLink>
                 <UButton
+                  v-if="canManageDocument(d)"
                   size="xs"
                   variant="soft"
                   icon="i-lucide-tag"
@@ -335,6 +349,7 @@ onBeforeUnmount(() => {
                   Vendor
                 </UButton>
                 <UButton
+                  v-if="canManageDocument(d)"
                   size="xs"
                   variant="soft"
                   icon="i-lucide-refresh-cw"

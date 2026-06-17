@@ -325,6 +325,8 @@ async function ensureVendorByName(params: {
     .from('vendors')
     .select('id')
     .eq('name', params.name)
+    .order('created_at', { ascending: true })
+    .limit(1)
     .maybeSingle()
   if (existing) return existing.id as string
 

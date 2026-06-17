@@ -244,7 +244,6 @@ async function canonicalDirectCandidates(
     let query = client
       .from('doc_price_items')
       .select('id, legacy_doc_item_id, document_id, vendor_id, source_page, source_table_id, source_row_index, source_col_index, section_breadcrumb, table_title, row_headers, column_headers, parent_headers, nearby_notes, raw_cell_value, normalized_price, currency, unit, moq, product_text, sku_text, description_text, attributes_json, searchable_text, normalized_search_text, source_confidence, parser_name, source_uploaded_at, documents:document_id(filename, vendor:vendor_id(name))')
-      .eq('tenant_id', filters.tenantId)
       .limit(limit)
     if (filters.documentId) query = query.eq('document_id', filters.documentId)
     if (filters.vendorId) query = query.eq('vendor_id', filters.vendorId)
@@ -352,7 +351,6 @@ async function legacyCandidates(
     let query = client
       .from('doc_items')
       .select('id, document_id, raw_name, sku, unit, price, moq, currency, source_page, documents:document_id(filename, created_at, vendor_id, vendor:vendor_id(name))')
-      .eq('owner_id', filters.tenantId)
       .not('price', 'is', null)
       .limit(Math.max(limit, 80))
     if (filters.documentId) query = query.eq('document_id', filters.documentId)

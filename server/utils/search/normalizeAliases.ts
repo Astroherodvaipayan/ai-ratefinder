@@ -31,10 +31,15 @@ async function loadAliases(params: {
   vendorId?: string | null
   documentId?: string | null
 }) {
+  const visibility = [
+    'tenant_id.is.null',
+    `tenant_id.eq.${params.tenantId}`,
+    params.documentId ? `document_id.eq.${params.documentId}` : null
+  ].filter(Boolean).join(',')
   const { data, error } = await params.client
     .from('search_aliases')
     .select('alias_text, canonical_text, confidence, source, scope, vendor_id, document_id')
-    .or(`tenant_id.is.null,tenant_id.eq.${params.tenantId}`)
+    .or(visibility)
     .gte('confidence', 0.35)
     .order('confidence', { ascending: false })
     .limit(500)
