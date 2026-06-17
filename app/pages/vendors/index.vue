@@ -159,7 +159,7 @@ onMounted(() => {
 
             <div class="flex shrink-0 items-center gap-1">
               <UButton
-                v-if="canDeleteVendor(folder)"
+                v-if="folder.id !== 'unassigned'"
                 size="xs"
                 variant="soft"
                 icon="i-lucide-upload"
@@ -179,7 +179,7 @@ onMounted(() => {
                 <UButton size="xs" variant="ghost" icon="i-lucide-pencil" class="rounded-md" aria-label="Edit folder icon" />
               </UDropdownMenu>
               <UButton
-                v-if="folder.id !== 'unassigned'"
+                v-if="canDeleteVendor(folder)"
                 size="xs"
                 variant="ghost"
                 color="error"
