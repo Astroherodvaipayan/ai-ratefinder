@@ -144,6 +144,25 @@ function highSignalProductTerms(parsed: ParsedUserItemQuery) {
   )
 }
 
+function wireVariantRecallTerms(productTerms: string[]) {
+  const terms = new Set<string>()
+  if (productTerms.includes('frlsh') || productTerms.includes('frls')) {
+    terms.add('FRLSH')
+    terms.add('FRLSH300')
+    terms.add('FRLS')
+  }
+  if (productTerms.includes('fr')) {
+    terms.add('FR300')
+    terms.add('FR ')
+  }
+  if (productTerms.includes('hffr')) {
+    terms.add('HFFR')
+    terms.add('HFFR300')
+  }
+  if (productTerms.includes('zhfr')) terms.add('ZHFR')
+  return [...terms]
+}
+
 export function buildLegacyStructuredRecallQueries(parsed: ParsedUserItemQuery): Array<{ terms: string[]; score: number }> {
   const coreHint = parsed.attribute_hints.find(hint => hint.name === 'cores')
   const lengthHint = parsed.attribute_hints.find(hint => hint.name === 'length')
@@ -263,6 +282,24 @@ async function canonicalDirectCandidates(
     ...parsed.attribute_hints.map(hint => hint.value)
   ].filter((term): term is string => Boolean(term && term.length >= 1)))
     .slice(0, 5)
+
+  const sizeHint = parsed.attribute_hints.find(hint => hint.name === 'size')
+  const wireVariantTerms = wireVariantRecallTerms(parsed.product_terms)
+  if (sizeHint && wireVariantTerms.length) {
+    const sizeValues = uniqueText([
+      sizeHint.value,
+      Number.isFinite(Number(sizeHint.value)) ? Number(sizeHint.value).toFixed(2) : null
+    ].filter(Boolean) as string[])
+    for (const variant of wireVariantTerms) {
+      for (const size of sizeValues) {
+        const { data, error } = await runBaseQuery()
+          .ilike('searchable_text', `%${sqlLikeTerm(variant)}%`)
+          .ilike('searchable_text', `%${sqlLikeTerm(size)}%`)
+          .limit(Math.max(limit, 160))
+        if (!error) addRows(data as any[], 0.94)
+      }
+    }
+  }
 
   if (focusedTerms.length >= 2) {
     let query = runBaseQuery().limit(Math.max(limit, 120))

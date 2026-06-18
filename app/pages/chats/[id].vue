@@ -24,6 +24,7 @@ interface CardItem {
   matched_column?: string | null
   match_explanation?: string | null
   suggested_query?: string | null
+  variant_label?: string | null
   price_basis?: PriceBasis | null
   requested_quantity?: RequestedQuantity | null
   alternatives?: CandidateAlternative[]
@@ -55,6 +56,7 @@ interface CandidateAlternative {
   source_page: number | null
   confidence: number
   needs_review: boolean
+  variant_label?: string | null
   price_basis?: PriceBasis | null
   suggested_query?: string | null
 }
@@ -291,6 +293,7 @@ function alternativeAsCardItem(base: CardItem, alternative: CandidateAlternative
     match_explanation: alternative.needs_review
       ? 'Possible match: confirm before adding.'
       : 'Possible match from the uploaded document.',
+    variant_label: alternative.variant_label ?? null,
     price_basis: alternative.price_basis ?? null,
     requested_quantity: base.requested_quantity ?? null
   }
@@ -506,6 +509,9 @@ async function onDocumentsUploaded() {
               <p v-if="effectiveRateLabel(it)" class="mt-1 text-xs font-medium text-toned">
                 Effective rate: {{ effectiveRateLabel(it) }}
               </p>
+              <p v-if="it.variant_label" class="mt-1 text-xs font-medium text-highlighted">
+                Variant: {{ it.variant_label }}
+              </p>
               <p v-if="quantityLabel(it)" class="mt-1 text-xs text-muted">
                 Requested quantity: {{ quantityLabel(it) }}
               </p>
@@ -522,6 +528,8 @@ async function onDocumentsUploaded() {
                 <dt class="text-muted">SKU</dt><dd class="min-w-0 break-words">{{ it.sku ?? '—' }}</dd>
                 <dt class="text-muted">Vendor</dt><dd class="min-w-0 break-words">{{ it.vendor }}</dd>
                 <dt class="text-muted">Source</dt><dd class="min-w-0 break-words">{{ sourceLabel(it) }}</dd>
+                <dt v-if="it.variant_label" class="text-muted">Variant</dt>
+                <dd v-if="it.variant_label" class="min-w-0 break-words">{{ it.variant_label }}</dd>
                 <dt v-if="it.matched_table" class="text-muted">Table</dt>
                 <dd v-if="it.matched_table" class="min-w-0 break-words">{{ it.matched_table }}</dd>
                 <dt v-if="it.matched_row || it.matched_column" class="text-muted">Match</dt>
@@ -562,6 +570,9 @@ async function onDocumentsUploaded() {
                       </span>
                       <span v-if="effectiveRateLabel(alt)" class="text-xs text-muted">
                         Effective {{ effectiveRateLabel(alt) }}
+                      </span>
+                      <span v-if="alt.variant_label" class="text-xs font-medium text-toned">
+                        Variant: {{ alt.variant_label }}
                       </span>
                       <UDropdownMenu
                         v-if="alt.confidence >= 0.65"

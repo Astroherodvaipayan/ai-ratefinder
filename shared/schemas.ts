@@ -30,6 +30,7 @@ export const ChatItem = z.object({
   matched_column: z.string().nullable().optional(),
   match_explanation: z.string().nullable().optional(),
   suggested_query: z.string().nullable().optional(),
+  variant_label: z.string().nullable().optional(),
   price_basis: z.object({
     source_price: z.number(),
     source_basis_quantity: z.number(),
@@ -57,6 +58,7 @@ export const ChatItem = z.object({
     source_page: z.number().int().nullable(),
     confidence: z.number().min(0).max(1),
     needs_review: z.boolean(),
+    variant_label: z.string().nullable().optional(),
     price_basis: z.object({
       source_price: z.number(),
       source_basis_quantity: z.number(),

@@ -29,6 +29,7 @@ export interface SearchItemsResult {
     match_explanation?: string | null
     requested_quantity?: RequestedQuantitySummary | null
     price_basis?: PriceBasisSummary
+    variant_label?: string | null
     suggested_query?: string | null
     alternatives?: PriceCandidateSummary[]
   }>
@@ -55,6 +56,7 @@ export interface PriceCandidateSummary {
   sku: string | null
   needs_review: boolean
   price_basis?: PriceBasisSummary
+  variant_label?: string | null
   suggested_query?: string | null
 }
 
@@ -110,6 +112,7 @@ function pricedItemFromScore(
     match_explanation: readableMatchExplanation(scored),
     requested_quantity: requestedQuantity,
     price_basis: priceBasis,
+    variant_label: variantLabelFromScore(scored),
     suggested_query: suggestedQuery(scored),
     alternatives: closest(alternatives)
   }
@@ -146,8 +149,31 @@ function closest(scored: ScoredCandidate[]): PriceCandidateSummary[] {
     sku: item.candidate.sku_text,
     needs_review: item.needs_review,
     price_basis: priceBasisFromScore(item),
+    variant_label: variantLabelFromScore(item),
     suggested_query: suggestedQuery(item)
   }))
+}
+
+function variantLabelFromScore(item: ScoredCandidate) {
+  const c = item.candidate
+  return variantLabelFromText([
+    c.row_headers.join(' '),
+    c.column_headers.join(' '),
+    c.parent_headers.join(' '),
+    c.table_title,
+    c.description_text,
+    c.product_text
+  ].filter(Boolean).join(' '))
+}
+
+function variantLabelFromText(value: string) {
+  const text = value.toLowerCase()
+  if (/\bfr\s*ls\s*h\b|frlsh/.test(text)) return 'FRLSH'
+  if (/\bfr\s*ls\b|frls/.test(text)) return 'FRLS'
+  if (/\bhffr\b|hffr\s*\d|hffr\d/.test(text)) return 'HFFR'
+  if (/\bzhfr\b|zhfr\s*\d|zhfr\d/.test(text)) return 'ZHFR'
+  if (/\bfr\b|fr\s*\d+\s*(?:mtrs?|meter|coil)|fr300/.test(text)) return 'FR'
+  return null
 }
 
 function priceBasisFromScore(item: ScoredCandidate) {
@@ -200,18 +226,37 @@ function requestedQuantityFor(parsed: { requested_quantities?: RequestedQuantity
   return parsed.requested_quantities?.[0] ?? null
 }
 
-function answerText(result: Pick<SearchItemsResult, 'priced_items' | 'unresolved_items'>) {
+function pricePhrase(item: Pick<PriceCandidateSummary, 'price' | 'currency' | 'price_basis' | 'variant_label'>) {
+  const variant = item.variant_label ? `${item.variant_label}: ` : ''
+  const basis = item.price_basis?.source_basis_label ? ` / ${item.price_basis.source_basis_label}` : ''
+  const effective = item.price_basis?.effective_unit && item.price_basis.effective_unit_price !== item.price
+    ? `, effective ${item.price_basis.effective_unit_price} ${item.currency}/${item.price_basis.effective_unit}`
+    : ''
+  return `${variant}${item.price} ${item.currency}${basis}${effective}`
+}
+
+function wireVariantGuidance(query: string) {
+  const normalized = query.toLowerCase()
+  const asksVariantDifference = /\bfr\b/.test(normalized)
+    && /\bfrls?h?\b/.test(normalized)
+    && !/\d+(?:[.,]\d+)?\s*(?:sq\s*mm|sqmm|mm)\b/i.test(query)
+  if (!asksVariantDifference) return null
+  return 'FR and FRLS/FRLSH are different wire variants. FR is flame-retardant. FRLS/FRLSH is flame-retardant with low-smoke/halogen wording in the price list. For pricing, choose the variant plus size and quantity, for example "2.5mm FR wire 6 bdl" or "2.5mm FRLS wire 6 bdl"; if you omit the variant, the app will show FR, FRLSH, and HFFR alternatives for review.'
+}
+
+function answerText(result: Pick<SearchItemsResult, 'priced_items' | 'unresolved_items'> & { guidance_messages?: string[] }) {
   const matched = result.priced_items.filter(item => !item.needs_review).length
   const review = result.priced_items.filter(item => item.needs_review).length
   const unresolved = result.unresolved_items.length
   const parts: string[] = []
+  if (result.guidance_messages?.length) parts.push(...result.guidance_messages)
   if (matched) parts.push(`Matched ${matched} source-backed item${matched === 1 ? '' : 's'}.`)
   if (review) {
     const reviewExamples = result.priced_items
       .filter(item => item.needs_review)
       .slice(0, 3)
       .map(item => item.suggested_query
-        ? `${item.query} -> did you mean ${item.suggested_query} at ${item.price} ${item.currency}`
+        ? `${item.query} -> did you mean ${item.suggested_query} at ${pricePhrase(item)}`
         : item.query)
       .join('; ')
     parts.push(`${review} item${review === 1 ? ' needs' : 's need'} review before quotation${reviewExamples ? `. Did you mean: ${reviewExamples}` : ''}.`)
@@ -223,7 +268,7 @@ function answerText(result: Pick<SearchItemsResult, 'priced_items' | 'unresolved
         const suggestions = item.closest_candidates
           .slice(0, 3)
           .flatMap(candidate => candidate.suggested_query
-            ? [`${candidate.suggested_query} at ${candidate.price} ${candidate.currency}`]
+            ? [`${candidate.suggested_query} at ${pricePhrase(candidate)}`]
             : [])
         return suggestions.length
           ? `${item.query} -> did you mean ${suggestions.join(' OR ')}`
@@ -248,6 +293,10 @@ export async function searchItems(params: {
   const queries = splitItemQueries(params.message)
   const perQuery = await mapWithConcurrency(queries, 6, async (query) => {
     const parsed = parseUserItemQuery(query)
+    const guidance = wireVariantGuidance(query)
+    if (guidance) {
+      return { query, parsed, scored: [], best: null, explanation: explainMatch({ query, scored: null, alternatives: [] }), guidance }
+    }
     const normalized = await normalizeAliases({
       client: params.client,
       tenantId: params.tenantId,
@@ -277,7 +326,7 @@ export async function searchItems(params: {
       alternatives: scored.slice(best && best.score >= 0.65 ? 1 : 0, 6)
     })
 
-    return { query, parsed: normalized.query, scored, best, explanation }
+    return { query, parsed: normalized.query, scored, best, explanation, guidance: null }
   })
 
   const priced_items = perQuery.flatMap(item => {
@@ -291,6 +340,7 @@ export async function searchItems(params: {
   })
 
   const unresolved_items = perQuery.flatMap(item => {
+    if (item.guidance) return []
     if (item.best && item.best.score >= 0.65) return []
     return [{
       query: item.query,
@@ -303,7 +353,11 @@ export async function searchItems(params: {
   })
 
   return {
-    answer_text: answerText({ priced_items, unresolved_items }),
+    answer_text: answerText({
+      priced_items,
+      unresolved_items,
+      guidance_messages: perQuery.flatMap(item => item.guidance ? [item.guidance] : [])
+    }),
     priced_items,
     unresolved_items,
     explanations: perQuery.map(item => item.explanation)

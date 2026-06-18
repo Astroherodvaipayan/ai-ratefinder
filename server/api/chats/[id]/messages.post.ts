@@ -65,6 +65,7 @@ export default defineEventHandler(async (event) => {
     matched_column: item.matched_column ?? null,
     match_explanation: item.match_explanation ?? null,
     suggested_query: item.suggested_query ?? null,
+    variant_label: item.variant_label ?? null,
     price_basis: item.price_basis,
     requested_quantity: item.requested_quantity ?? null,
     alternatives: item.alternatives ?? []
