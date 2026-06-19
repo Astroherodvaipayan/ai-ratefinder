@@ -4,7 +4,7 @@ export default defineEventHandler(async (event) => {
   const { data, error } = await client
     .from('documents')
     .select(`
-      id, filename, mime, size, status, page_count, error, created_at, chandra_request_id,
+      id, owner_id, filename, mime, size, status, page_count, error, created_at, chandra_request_id,
       vendor:vendor_id(id, name),
       doc_items(count)
     `)

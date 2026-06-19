@@ -4,17 +4,22 @@ import {
   MAX_DOCUMENT_UPLOAD_LABEL,
   documentUploadSizeError
 } from '~~/shared/documentUpload'
-import { uploadDocumentDirect } from '~/utils/directDocumentUpload'
+import {
+  ApiBudgetExceededError,
+  uploadDocumentDirect,
+  type ApiBudgetUsage
+} from '~/utils/directDocumentUpload'
 
 definePageMeta({ layout: 'default' })
 
 interface Doc {
-  id: string; filename: string; mime: string | null; size: number | null
+  id: string; owner_id: string; filename: string; mime: string | null; size: number | null
   status: string; page_count: number | null; error: string | null
   created_at: string; item_count: number; parsed_with_internal?: boolean
   vendor: { id: string; name: string } | null
 }
 
+const user = useSupabaseUser()
 const { data: docs, refresh } = useFetch<Doc[]>('/api/documents', { default: () => [], lazy: true })
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -29,6 +34,8 @@ const savingVendorIds = ref<string[]>([])
 const uploadProgress = ref(0)
 const uploadFilename = ref('')
 const uploadPhase = ref<'idle' | 'uploading' | 'queued'>('idle')
+const budgetPaymentOpen = ref(false)
+const budgetUsage = ref<ApiBudgetUsage | null>(null)
 const uploadLabel = computed(() =>
   uploadPhase.value === 'uploading'
     ? `Uploading ${uploadFilename.value || 'document'} directly to storage...`
@@ -75,6 +82,10 @@ function statusText(status: string) {
   if (status === 'extracting') return 'Indexing price rows'
   if (status === 'uploading') return 'Uploading'
   return status
+}
+
+function canManageDocument(doc: Pick<Doc, 'owner_id'>) {
+  return Boolean(user.value?.id && doc.owner_id === user.value.id)
 }
 
 async function uploadOneFile(file: File): Promise<void> {
@@ -126,6 +137,10 @@ async function uploadFiles(files: FileList | File[]) {
       if (uploadPhase.value === 'queued') uploadPhase.value = 'idle'
     }, 1800)
   } catch (err: any) {
+    if (err instanceof ApiBudgetExceededError || err?.billing) {
+      budgetUsage.value = err.billing ?? null
+      budgetPaymentOpen.value = true
+    }
     uploadError.value = err?.statusMessage || err?.message || 'Upload failed'
   } finally {
     uploading.value = false
@@ -134,6 +149,10 @@ async function uploadFiles(files: FileList | File[]) {
 }
 
 async function reparseDocument(doc: Doc) {
+  if (!canManageDocument(doc)) {
+    reparseError.value = 'Only the uploader can reparse this shared document.'
+    return
+  }
   if (reparsingIds.value.includes(doc.id)) return
   reparseError.value = null
   reparsingIds.value = [...reparsingIds.value, doc.id]
@@ -149,6 +168,10 @@ async function reparseDocument(doc: Doc) {
 }
 
 async function editDocumentVendor(doc: Doc) {
+  if (!canManageDocument(doc)) {
+    vendorEditError.value = 'Only the uploader can edit this shared document.'
+    return
+  }
   if (savingVendorIds.value.includes(doc.id)) return
   vendorEditError.value = null
   const nextName = prompt('Vendor name', doc.vendor?.name ?? '')?.trim()
@@ -325,6 +348,7 @@ onBeforeUnmount(() => {
                 </div>
                 </NuxtLink>
                 <UButton
+                  v-if="canManageDocument(d)"
                   size="xs"
                   variant="soft"
                   icon="i-lucide-tag"
@@ -335,6 +359,7 @@ onBeforeUnmount(() => {
                   Vendor
                 </UButton>
                 <UButton
+                  v-if="canManageDocument(d)"
                   size="xs"
                   variant="soft"
                   icon="i-lucide-refresh-cw"
@@ -373,4 +398,10 @@ onBeforeUnmount(() => {
       </div>
     </div>
   </div>
+
+  <ApiBudgetPaymentModal
+    v-model:open="budgetPaymentOpen"
+    :usage="budgetUsage"
+    @paid="uploadError = null"
+  />
 </template>

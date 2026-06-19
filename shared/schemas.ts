@@ -12,7 +12,8 @@ export const PriceRow = z.object({
 export type PriceRow = z.infer<typeof PriceRow>
 
 export const ChatItem = z.object({
-  doc_item_id: z.string().uuid(),
+  doc_item_id: z.string().uuid().nullable(),
+  doc_price_item_id: z.string().uuid().nullable().optional(),
   product_name: z.string(),
   sku: z.string().nullable(),
   unit: z.string().nullable(),
@@ -22,6 +23,52 @@ export const ChatItem = z.object({
   vendor: z.string(),
   source_document: z.string().optional(),
   source_page: z.number().int().nullable(),
-  confidence: z.number().min(0).max(1)
+  confidence: z.number().min(0).max(1),
+  needs_review: z.boolean().optional(),
+  matched_table: z.string().nullable().optional(),
+  matched_row: z.string().nullable().optional(),
+  matched_column: z.string().nullable().optional(),
+  match_explanation: z.string().nullable().optional(),
+  suggested_query: z.string().nullable().optional(),
+  variant_label: z.string().nullable().optional(),
+  price_basis: z.object({
+    source_price: z.number(),
+    source_basis_quantity: z.number(),
+    source_basis_unit: z.string().nullable(),
+    source_basis_pack_unit: z.string().nullable(),
+    source_basis_label: z.string().nullable(),
+    effective_unit_price: z.number(),
+    effective_unit: z.string().nullable()
+  }).optional(),
+  requested_quantity: z.object({
+    value: z.number(),
+    unit: z.string().nullable(),
+    raw: z.string()
+  }).nullable().optional(),
+  alternatives: z.array(z.object({
+    doc_item_id: z.string().uuid().nullable(),
+    doc_price_item_id: z.string().uuid().nullable().optional(),
+    description: z.string(),
+    sku: z.string().nullable(),
+    unit: z.string().nullable(),
+    price: z.number(),
+    currency: z.string().default('INR'),
+    vendor: z.string().nullable(),
+    source_document: z.string(),
+    source_page: z.number().int().nullable(),
+    confidence: z.number().min(0).max(1),
+    needs_review: z.boolean(),
+    variant_label: z.string().nullable().optional(),
+    price_basis: z.object({
+      source_price: z.number(),
+      source_basis_quantity: z.number(),
+      source_basis_unit: z.string().nullable(),
+      source_basis_pack_unit: z.string().nullable(),
+      source_basis_label: z.string().nullable(),
+      effective_unit_price: z.number(),
+      effective_unit: z.string().nullable()
+    }).optional(),
+    suggested_query: z.string().nullable().optional()
+  })).optional()
 })
 export type ChatItem = z.infer<typeof ChatItem>

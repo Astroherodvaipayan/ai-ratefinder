@@ -20,6 +20,10 @@ interface QuotationForPdf {
   gst_pct: number
   freight: number
   notes?: string | null
+  payment_terms?: string | null
+  delivery_terms?: string | null
+  validity?: string | null
+  revision_no?: number | null
   items: Array<{
     line_no: number
     description: string
@@ -78,7 +82,8 @@ export async function renderQuotationPdf(q: QuotationForPdf): Promise<Buffer> {
             stack: [
               { text: 'Proforma Invoice', style: 'h1' },
               { text: q.title, style: 'h2' },
-              q.customer ? { text: `Customer: ${q.customer}`, color: '#555' } : { text: '' }
+              q.customer ? { text: `Customer: ${q.customer}`, color: '#555' } : { text: '' },
+              { text: `Revision: ${q.revision_no ?? 1}`, color: '#555' }
             ]
           }
         ],
@@ -95,7 +100,15 @@ export async function renderQuotationPdf(q: QuotationForPdf): Promise<Buffer> {
       {
         margin: [0, 16, 0, 0],
         columns: [
-          { width: '*', text: q.notes ?? '' },
+          {
+            width: '*',
+            stack: [
+              q.validity ? { text: `Validity: ${q.validity}` } : { text: '' },
+              q.payment_terms ? { text: `Payment terms: ${q.payment_terms}` } : { text: '' },
+              q.delivery_terms ? { text: `Delivery terms: ${q.delivery_terms}` } : { text: '' },
+              q.notes ? { text: `Notes: ${q.notes}`, margin: [0, 8, 0, 0] } : { text: '' }
+            ]
+          },
           {
             width: 220,
             table: {

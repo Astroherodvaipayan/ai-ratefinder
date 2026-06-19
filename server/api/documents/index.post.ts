@@ -9,12 +9,16 @@
  * Parser mode is user configurable: auto, internal parser, Chandra OCR, or Sarvam OCR.
  */
 import { randomUUID } from 'node:crypto'
+import { canonicalizeExtractedRows, type CanonicalTable } from '../../utils/extraction/canonicalizeTable'
+import { persistDocumentAliases } from '../../utils/extraction/mineDocumentAliases'
+import { priceCellToRecord } from '../../utils/extraction/priceCellRecords'
 import { parseInternalPriceDocument } from '../../utils/internalPriceParser'
 import { getParserSettings } from '../../utils/parserSettings'
 import { runChandraPriceExtraction, type ExtractedPriceRow } from '../../utils/priceExtraction'
 import { runSarvamPriceExtraction } from '../../utils/sarvam'
 import { adminClient } from '../../utils/supabase'
 import { ensureUploadBucketLimit } from '../../utils/uploadBucket'
+import { recordDocumentApiCost } from '../../utils/billing'
 import {
   MAX_DOCUMENT_UPLOAD_BYTES,
   documentUploadSizeError
@@ -35,6 +39,7 @@ type StoredUploadBody = {
 }
 
 const DOC_ITEM_INSERT_CHUNK_SIZE = 1000
+const MAX_STORED_PARSED_MARKDOWN_CHARS = Number(process.env.MAX_STORED_PARSED_MARKDOWN_CHARS || 200_000)
 
 const KNOWN_VENDOR_NAMES = [
   'ABB',
@@ -81,6 +86,15 @@ function inferVendorName(filename: string, markdown: string, existingNames: stri
   return matched[0]?.name ?? null
 }
 
+function storedParsedMarkdown(markdown: string) {
+  if (markdown.length <= MAX_STORED_PARSED_MARKDOWN_CHARS) return markdown
+  return [
+    markdown.slice(0, MAX_STORED_PARSED_MARKDOWN_CHARS),
+    '',
+    `[AI Ratefinder truncated stored parser preview at ${MAX_STORED_PARSED_MARKDOWN_CHARS} characters; structured price rows remain fully indexed.]`
+  ].join('\n')
+}
+
 async function ensureVendorForMarkdown(params: {
   client: ReturnType<typeof adminClient>
   ownerId: string
@@ -121,14 +135,17 @@ async function ensureVendorForMarkdown(params: {
   return created.id as string
 }
 
+type InsertedDocItem = ExtractedPriceRow & { id: string }
+
 async function insertDocItemsInChunks(params: {
   client: ReturnType<typeof adminClient>
   doc: UploadedDoc
   rows: ExtractedPriceRow[]
-}) {
+}): Promise<InsertedDocItem[]> {
+  const inserted: InsertedDocItem[] = []
   for (let index = 0; index < params.rows.length; index += DOC_ITEM_INSERT_CHUNK_SIZE) {
     const chunk = params.rows.slice(index, index + DOC_ITEM_INSERT_CHUNK_SIZE)
-    const { error } = await params.client.from('doc_items').insert(chunk.map(r => ({
+    const { data, error } = await params.client.from('doc_items').insert(chunk.map(r => ({
       owner_id: params.doc.owner_id,
       document_id: params.doc.id,
       raw_name: r.raw_name,
@@ -139,7 +156,173 @@ async function insertDocItemsInChunks(params: {
       currency: r.currency,
       source_page: r.source_page,
       raw_row: null
+    }))).select('id, raw_name, sku, unit, price, moq, currency, source_page')
+    if (error) throw error
+    inserted.push(...(data ?? []).map((row: any) => ({
+      id: row.id,
+      raw_name: row.raw_name,
+      sku: row.sku,
+      unit: row.unit,
+      price: row.price === null ? null : Number(row.price),
+      moq: row.moq,
+      currency: row.currency,
+      source_page: row.source_page
     })))
+  }
+  return inserted
+}
+
+function legacyItemsByPageAndRow(items: InsertedDocItem[]) {
+  const grouped = new Map<number | null, InsertedDocItem[]>()
+  for (const item of items) {
+    const key = item.source_page ?? null
+    grouped.set(key, [...(grouped.get(key) ?? []), item])
+  }
+  return grouped
+}
+
+async function persistCanonicalPriceRecords(params: {
+  client: ReturnType<typeof adminClient>
+  doc: UploadedDoc
+  filename: string
+  parserName: string
+  markdown: string
+  rows: ExtractedPriceRow[]
+  insertedDocItems: InsertedDocItem[]
+}) {
+  if (!params.rows.length) return
+
+  try {
+    const { data: document } = await params.client
+      .from('documents')
+      .select('id, filename, created_at, vendor_id, vendor:vendor_id(name)')
+      .eq('id', params.doc.id)
+      .single()
+
+    const vendorId = (document?.vendor_id as string | null | undefined) ?? params.doc.vendor_id ?? null
+    const vendorName = (document as any)?.vendor?.name ?? null
+    const sourceUploadedAt = (document?.created_at as string | null | undefined) ?? null
+    const tables = canonicalizeExtractedRows({
+      rows: params.rows,
+      documentTitle: params.filename,
+      vendorName,
+      parserName: params.parserName,
+      parserConfidence: params.parserName === 'legacy-doc-items' ? 0.62 : 0.78,
+      ocrConfidence: null
+    })
+    const legacyByPage = legacyItemsByPageAndRow(params.insertedDocItems)
+
+    for (const table of tables) {
+      await persistCanonicalTable({
+        ...params,
+        table,
+        vendorId,
+        vendorName,
+        sourceUploadedAt,
+        legacyByPage
+      })
+    }
+
+    await persistDocumentAliases({
+      client: params.client,
+      tenantId: params.doc.owner_id,
+      vendorId,
+      documentId: params.doc.id,
+      text: `${params.filename}\n${params.markdown}`
+    })
+  } catch (err: any) {
+    console.warn('Canonical price record persistence failed', err?.message ?? err)
+  }
+}
+
+async function persistCanonicalTable(params: {
+  client: ReturnType<typeof adminClient>
+  doc: UploadedDoc
+  filename: string
+  table: CanonicalTable
+  vendorId: string | null
+  vendorName: string | null
+  sourceUploadedAt: string | null
+  legacyByPage: Map<number | null, InsertedDocItem[]>
+}) {
+  const { data: tableRow, error: tableError } = await params.client
+    .from('doc_tables')
+    .insert({
+      tenant_id: params.doc.owner_id,
+      document_id: params.doc.id,
+      vendor_id: params.vendorId,
+      source_page: params.table.source_page,
+      table_index: params.table.table_index,
+      table_title: params.table.table_title,
+      section_breadcrumb: params.table.section_breadcrumb,
+      parser_name: params.table.parser_name,
+      parser_confidence: params.table.parser_confidence,
+      ocr_confidence: params.table.ocr_confidence
+    })
+    .select('id')
+    .single()
+  if (tableError || !tableRow) throw tableError ?? new Error('Could not insert doc table')
+
+  const cellRows = params.table.cells.map(cell => ({
+    tenant_id: params.doc.owner_id,
+    document_id: params.doc.id,
+    vendor_id: params.vendorId,
+    source_table_id: tableRow.id,
+    source_page: cell.source_page,
+    source_row_index: cell.source_row_index,
+    source_col_index: cell.source_col_index,
+    source_rowspan: cell.source_rowspan,
+    source_colspan: cell.source_colspan,
+    is_header: cell.is_header,
+    is_price: cell.is_price,
+    row_headers: cell.row_headers,
+    column_headers: cell.column_headers,
+    parent_headers: cell.parent_headers,
+    merged_headers: cell.merged_headers,
+    raw_cell_value: cell.raw_cell_value,
+    normalized_value: cell.normalized_value,
+    unit: cell.unit,
+    currency: cell.currency,
+    moq: cell.moq,
+    footnotes: cell.footnotes,
+    nearby_notes: cell.nearby_notes,
+    bbox: cell.bbox,
+    parser_confidence: cell.parser_confidence,
+    ocr_confidence: cell.ocr_confidence
+  }))
+
+  const { data: insertedCells, error: cellError } = await params.client
+    .from('doc_table_cells')
+    .insert(cellRows)
+    .select('id, source_row_index, source_col_index')
+  if (cellError) throw cellError
+
+  const cellIdByPosition = new Map(
+    (insertedCells ?? []).map((cell: any) => [`${cell.source_row_index}:${cell.source_col_index}`, cell.id as string])
+  )
+  const legacyForPage = params.legacyByPage.get(params.table.source_page ?? null) ?? []
+
+  const priceRows = params.table.cells.flatMap(cell => {
+    if (!cell.is_price) return []
+    const legacy = legacyForPage[cell.source_row_index - 1] ?? null
+    const record = priceCellToRecord({
+      tenant_id: params.doc.owner_id,
+      document_id: params.doc.id,
+      vendor_id: params.vendorId,
+      vendor_name: params.vendorName,
+      document_title: params.filename,
+      source_uploaded_at: params.sourceUploadedAt,
+      legacy_doc_item_id: legacy?.id ?? null,
+      source_table_id: tableRow.id as string,
+      source_cell_id: cellIdByPosition.get(`${cell.source_row_index}:${cell.source_col_index}`) ?? null,
+      table: params.table,
+      cell
+    })
+    return record ? [record] : []
+  })
+
+  if (priceRows.length) {
+    const { error } = await params.client.from('doc_price_items').insert(priceRows)
     if (error) throw error
   }
 }
@@ -153,6 +336,8 @@ async function ensureVendorByName(params: {
     .from('vendors')
     .select('id')
     .eq('name', params.name)
+    .order('created_at', { ascending: true })
+    .limit(1)
     .maybeSingle()
   if (existing) return existing.id as string
 
@@ -259,6 +444,7 @@ export async function processUploadedDocument(params: {
     let markdown = ''
     let pageCount: number | null = null
     let rows: ExtractedPriceRow[] = []
+    let selectedParserName = 'unknown'
     const parserWarnings: string[] = []
 
     if (parserMode !== 'chandra' && parserMode !== 'sarvam') {
@@ -274,6 +460,7 @@ export async function processUploadedDocument(params: {
           mime: params.mime
         })
         if (internal.rows.length > 0 || parserMode === 'internal') {
+          selectedParserName = internal.parser
           markdown = internal.markdown
           pageCount = internal.pageCount
           rows = internal.rows.map(row => ({
@@ -305,6 +492,7 @@ export async function processUploadedDocument(params: {
           language: parserSettings.sarvam_language
         })
         requestId = `sarvam:${sarvam.requestId}`
+        selectedParserName = 'sarvam'
         markdown = sarvam.markdown
         pageCount = sarvam.pageCount
         rows = sarvam.rows
@@ -328,6 +516,7 @@ export async function processUploadedDocument(params: {
         mime: params.mime
       })
       requestId = chandra.requestId
+      selectedParserName = 'chandra'
       markdown = chandra.markdown
       pageCount = chandra.pageCount
       rows = chandra.rows
@@ -350,14 +539,29 @@ export async function processUploadedDocument(params: {
     await client.from('documents').update({
       status: 'extracting',
       chandra_request_id: requestId,
-      parsed_markdown: markdown,
+      parsed_markdown: storedParsedMarkdown(markdown),
       page_count: pageCount,
       updated_at: new Date().toISOString()
     }).eq('id', params.doc.id)
 
     if (rows.length > 0) {
-      await insertDocItemsInChunks({ client, doc: params.doc, rows })
+      const insertedDocItems = await insertDocItemsInChunks({ client, doc: params.doc, rows })
+      await persistCanonicalPriceRecords({
+        client,
+        doc: params.doc,
+        filename: params.filename,
+        parserName: selectedParserName,
+        markdown,
+        rows,
+        insertedDocItems
+      })
     }
+
+    await recordDocumentApiCost({
+      client,
+      documentId: params.doc.id,
+      pageCount
+    })
 
     await client.from('documents').update({
       status: 'parsed',

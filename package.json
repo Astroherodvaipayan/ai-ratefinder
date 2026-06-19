@@ -8,7 +8,14 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "typecheck": "nuxt typecheck"
+    "typecheck": "nuxt typecheck",
+    "eval:search": "node scripts/search-eval.mjs",
+    "eval:mutations": "node scripts/search-mutations.mjs",
+    "eval:demo-doc": "node scripts/search-demo-doc.mjs",
+    "eval:robust": "node scripts/search-robust.mjs",
+    "eval:all-docs": "node scripts/search-all-docs-smoke.mjs",
+    "eval:speed": "node scripts/search-speed-check.mjs",
+    "prod:check": "node scripts/prod-readiness-check.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
@@ -22,6 +29,7 @@
     "jszip": "^3.10.1",
     "lottie-web": "^5.13.0",
     "nuxt": "^4.0.0",
+    "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "pdfmake": "^0.2.10",
     "sarvamai": "^1.1.7",

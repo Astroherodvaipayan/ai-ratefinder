@@ -2,7 +2,11 @@ import {
   MAX_DOCUMENT_UPLOAD_BYTES,
   documentUploadSizeError
 } from '~~/shared/documentUpload'
-import { uploadDocumentDirect } from '~/utils/directDocumentUpload'
+import {
+  ApiBudgetExceededError,
+  uploadDocumentDirect,
+  type ApiBudgetUsage
+} from '~/utils/directDocumentUpload'
 
 export type UploadPhase = 'idle' | 'uploading' | 'queued'
 
@@ -14,6 +18,8 @@ export function useDocumentUpload(onComplete?: () => void | Promise<void>) {
   const uploadProgress = ref(0)
   const uploadFilename = ref('')
   const uploadPhase = ref<UploadPhase>('idle')
+  const budgetPaymentOpen = ref(false)
+  const budgetUsage = ref<ApiBudgetUsage | null>(null)
   const vendorNameError = computed(() =>
     vendorName.value.trim() ? null : 'Vendor name is required.'
   )
@@ -71,7 +77,11 @@ export function useDocumentUpload(onComplete?: () => void | Promise<void>) {
       uploadPhase.value = 'queued'
       await onComplete?.()
     } catch (err: unknown) {
-      const e = err as { statusMessage?: string; message?: string }
+      const e = err as { statusMessage?: string; message?: string; billing?: ApiBudgetUsage | null }
+      if (err instanceof ApiBudgetExceededError || e?.billing) {
+        budgetUsage.value = e.billing ?? null
+        budgetPaymentOpen.value = true
+      }
       uploadError.value = e?.statusMessage || e?.message || 'Upload failed'
       uploadPhase.value = 'idle'
     } finally {
@@ -107,6 +117,8 @@ export function useDocumentUpload(onComplete?: () => void | Promise<void>) {
     isDragging,
     uploading,
     uploadError,
+    budgetPaymentOpen,
+    budgetUsage,
     uploadProgress,
     uploadFilename,
     uploadPhase,

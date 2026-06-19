@@ -8,6 +8,11 @@ interface QuotationForXlsx {
   discount_pct: number
   gst_pct: number
   freight: number
+  notes?: string | null
+  payment_terms?: string | null
+  delivery_terms?: string | null
+  validity?: string | null
+  revision_no?: number | null
   items: Array<{
     line_no: number
     description: string
@@ -40,6 +45,11 @@ export async function renderQuotationXlsx(q: QuotationForXlsx): Promise<Buffer> 
   ws.addRow(['', 'Proforma Invoice'])
   ws.addRow(['', q.title])
   if (q.customer) ws.addRow(['', `Customer: ${q.customer}`])
+  ws.addRow(['', `Revision: ${q.revision_no ?? 1}`])
+  if (q.validity) ws.addRow(['', `Validity: ${q.validity}`])
+  if (q.payment_terms) ws.addRow(['', `Payment terms: ${q.payment_terms}`])
+  if (q.delivery_terms) ws.addRow(['', `Delivery terms: ${q.delivery_terms}`])
+  if (q.notes) ws.addRow(['', `Notes: ${q.notes}`])
   ws.addRow([])
 
   ws.getRow(1).height = 36

@@ -1,5 +1,6 @@
 import { runChandra, runDatalabExtract } from './chandra'
 import { extractPriceRows } from './extract'
+import { parsePriceRowsFromHtmlTables } from './internalPriceParser'
 import { selectPricePagesForExtraction, splitPaginatedMarkdown } from './pricePages'
 
 export type ExtractedPriceRow = {
@@ -137,6 +138,56 @@ function hasPricedRows(rows: ExtractedPriceRow[]) {
   return rows.some(row => row.price !== null && /[a-z0-9]/i.test(row.raw_name))
 }
 
+function rowKey(row: ExtractedPriceRow) {
+  return JSON.stringify([
+    row.raw_name.toLowerCase().replace(/\s+/g, ' ').trim(),
+    row.sku?.toLowerCase().replace(/\s+/g, ' ').trim() ?? '',
+    row.unit?.toLowerCase().replace(/\s+/g, ' ').trim() ?? '',
+    row.price ?? null
+  ])
+}
+
+function dedupeExtractedRows(rows: ExtractedPriceRow[]) {
+  const seen = new Set<string>()
+  return rows.filter(row => {
+    const key = rowKey(row)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function structuredRowsFromMarkdown(markdown: string): ExtractedPriceRow[] {
+  return parsePriceRowsFromHtmlTables(markdown).map(row => ({
+    raw_name: row.raw_name,
+    sku: row.sku,
+    unit: row.unit,
+    price: row.price,
+    moq: row.moq,
+    currency: row.currency,
+    source_page: row.source_page ?? null
+  }))
+}
+
+function shouldPreferStructuredRows(
+  structuredRows: ExtractedPriceRow[],
+  existingRows: ExtractedPriceRow[]
+) {
+  if (!structuredRows.length) return false
+  if (!hasPricedRows(existingRows)) return true
+  if (structuredRows.length >= 20 && structuredRows.length >= existingRows.length * 0.5) return true
+  return false
+}
+
+function applyStructuredRows(markdown: string, existingRows: ExtractedPriceRow[]) {
+  const structuredRows = structuredRowsFromMarkdown(markdown)
+  if (!structuredRows.length) return existingRows
+  if (shouldPreferStructuredRows(structuredRows, existingRows)) {
+    return dedupeExtractedRows(structuredRows)
+  }
+  return dedupeExtractedRows([...existingRows, ...structuredRows])
+}
+
 function regexRowsFromMarkdown(
   markdown: string,
   pageSelection: ReturnType<typeof selectPricePagesForExtraction>,
@@ -205,6 +256,10 @@ export async function runChandraPriceExtraction(params: {
     markdown ||= converted.result.markdown ?? ''
     pageCount ??= converted.result.page_count ?? null
     checkpointId ||= converted.result.checkpoint_id ?? null
+  }
+
+  if (markdown) {
+    rows = applyStructuredRows(markdown, rows)
   }
 
   if (!hasPricedRows(rows)) {

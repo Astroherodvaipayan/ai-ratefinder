@@ -3,9 +3,10 @@ definePageMeta({ layout: 'default' })
 
 const route = useRoute()
 const id = computed(() => route.params.id as string)
+const user = useSupabaseUser()
 
 interface DocDetail {
-  id: string; filename: string; status: string; page_count: number | null
+  id: string; owner_id: string; filename: string; status: string; page_count: number | null
   parsed_markdown: string | null; mime: string | null; parsed_with_internal?: boolean
   vendor: { id: string; name: string } | null
   items: Array<{
@@ -32,6 +33,7 @@ const isImageSource = computed(() => fileMime.value?.startsWith('image/') ?? fal
 const isProcessing = computed(() => doc.value && ['uploading', 'ocr', 'extracting'].includes(doc.value.status))
 const markdownText = computed(() => doc.value?.parsed_markdown?.trim() || '')
 const parsedOutputIsHtml = computed(() => /<\/?(table|html|body|thead|tbody|tr|td|th|p|div|h[1-6])[\s>]/i.test(markdownText.value))
+const canManageDocument = computed(() => Boolean(doc.value?.owner_id && user.value?.id && doc.value.owner_id === user.value.id))
 
 async function loadSource() {
   if (fileUrl.value) return
@@ -42,12 +44,17 @@ async function loadSource() {
 
 const router = useRouter()
 async function destroy() {
+  if (!canManageDocument.value) return
   if (!confirm('Delete this document and all its rows?')) return
   await $fetch(`/api/documents/${id.value}`, { method: 'DELETE' })
   router.push('/library')
 }
 
 async function reparseDocument() {
+  if (!canManageDocument.value) {
+    reparseError.value = 'Only the uploader can reparse this shared document.'
+    return
+  }
   if (reparsing.value || isProcessing.value) return
   reparsing.value = true
   reparseError.value = null
@@ -71,6 +78,10 @@ async function reparseDocument() {
 }
 
 async function editDocumentVendor() {
+  if (!canManageDocument.value) {
+    vendorEditError.value = 'Only the uploader can edit this shared document.'
+    return
+  }
   if (!doc.value || savingVendor.value) return
   vendorEditError.value = null
   const nextName = prompt('Vendor name', doc.value.vendor?.name ?? '')?.trim()
@@ -142,6 +153,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="flex items-center gap-2">
         <UButton
+          v-if="canManageDocument"
           size="sm"
           variant="soft"
           icon="i-lucide-tag"
@@ -151,6 +163,7 @@ onBeforeUnmount(() => {
           Edit vendor
         </UButton>
         <UButton
+          v-if="canManageDocument"
           size="sm"
           variant="soft"
           icon="i-lucide-refresh-cw"
@@ -160,7 +173,7 @@ onBeforeUnmount(() => {
         >
           Reparse
         </UButton>
-        <UButton size="sm" color="error" variant="soft" icon="i-lucide-trash-2" @click="destroy">
+        <UButton v-if="canManageDocument" size="sm" color="error" variant="soft" icon="i-lucide-trash-2" @click="destroy">
           Delete
         </UButton>
       </div>

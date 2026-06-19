@@ -2,17 +2,15 @@
  * Post a user message into a chat.
  *
  *   - Persists the user message
- *   - Retrieves top-N candidate doc_items + surrounding markdown
- *   - Sends candidates + history to Gemini for a structured answer
- *   - Sanitizes cited items against retrieved rows and creates/updates the
- *     chat's draft proforma invoice
+ *   - Parses/searches/scores indexed price records deterministically
+ *   - Creates/updates the chat's draft proforma invoice only for high-confidence
+ *     source-backed matches
  *   - Persists the assistant message (text + cited items)
  *   - Returns the assistant message
  */
 import { z } from 'zod'
-import { answerFromCandidates, constrainChatAnswer, type ChatTurn } from '../../../utils/gemini'
-import { addDocItemsToQuotation, ensureChatQuotation } from '../../../utils/quotations'
-import { retrieveCandidates } from '../../../utils/retrieval'
+import { addDocItemsToQuotation, addPriceItemsToQuotation, ensureChatQuotation } from '../../../utils/quotations'
+import { searchItems } from '../../../utils/search/searchItems'
 
 const Body = z.object({
   content: z.string().min(1),
@@ -39,42 +37,69 @@ export default defineEventHandler(async (event) => {
     chat_id: chatId, role: 'user', content
   })
 
-  // Load short history (last 8 turns) for Gemini context
-  const { data: prior } = await client
-    .from('chat_messages')
-    .select('role, content')
-    .eq('chat_id', chatId)
-    .order('created_at', { ascending: false })
-    .limit(8)
-  const history: ChatTurn[] = (prior ?? []).reverse() as ChatTurn[]
-
-  const scope = await resolveScopeLabels(client, { documentId, vendorId })
-
-  // Retrieve candidates and ask Gemini
-  const candidates = await retrieveCandidates(client, content, 30, {
+  const deterministic = await searchItems({
+    client,
+    tenantId: user.id,
+    message: content,
     documentId,
     vendorId,
-    ownerId: user.id
+    limitPerItem: 40
   })
-  const rawReply = await answerFromCandidates(content, candidates, history.slice(0, -1), scope)
-  const reply = constrainChatAnswer(rawReply, candidates)
+
+  const replyItems = deterministic.priced_items.map(item => ({
+    doc_price_item_id: item.doc_price_item_id,
+    doc_item_id: item.doc_item_id ?? item.doc_price_item_id,
+    product_name: item.description,
+    sku: item.sku,
+    unit: item.unit,
+    price: item.price,
+    moq: item.moq,
+    currency: item.currency,
+    vendor: item.vendor ?? 'Unknown vendor',
+    source_document: item.source_document,
+    source_page: item.source_page,
+    confidence: item.confidence,
+    needs_review: item.needs_review,
+    matched_table: item.matched_table ?? null,
+    matched_row: item.matched_row ?? null,
+    matched_column: item.matched_column ?? null,
+    match_explanation: item.match_explanation ?? null,
+    suggested_query: item.suggested_query ?? null,
+    variant_label: item.variant_label ?? null,
+    price_basis: item.price_basis,
+    requested_quantity: item.requested_quantity ?? null,
+    alternatives: item.alternatives ?? []
+  }))
 
   let quotationId: string | null = chat.quotation_id ?? null
-  if (reply.items.length) {
+  const highConfidence = deterministic.priced_items.filter(item => !item.needs_review && item.confidence >= 0.85)
+  if (highConfidence.length) {
     quotationId = await ensureChatQuotation(client, user.id, chat as any, content)
-    await addDocItemsToQuotation(
-      client,
-      quotationId,
-      reply.items.map(item => item.doc_item_id)
-    )
+    const canonicalIds = highConfidence
+      .map(item => item.doc_price_item_id)
+      .filter((id): id is string => Boolean(id))
+    const canonicalQuantities = new Map(highConfidence
+      .filter(item => item.doc_price_item_id && item.requested_quantity?.value)
+      .map(item => [item.doc_price_item_id!, item.requested_quantity!]))
+    if (canonicalIds.length) await addPriceItemsToQuotation(client, quotationId, canonicalIds, canonicalQuantities)
+
+    const legacyIds = highConfidence
+      .filter(item => !item.doc_price_item_id && item.doc_item_id)
+      .map(item => item.doc_item_id!)
+    const legacyQuantities = new Map(highConfidence
+      .filter(item => !item.doc_price_item_id && item.doc_item_id && item.requested_quantity?.value)
+      .map(item => [item.doc_item_id!, item.requested_quantity!]))
+    if (legacyIds.length) await addDocItemsToQuotation(client, quotationId, legacyIds, legacyQuantities)
   }
+
+  await persistMatchLogs(client, user.id, deterministic, highConfidence)
 
   // Persist assistant message
   const { data: msg, error } = await client.from('chat_messages').insert({
     chat_id: chatId,
     role: 'assistant',
-    content: reply.answer_text,
-    items: reply.items
+    content: deterministic.answer_text,
+    items: replyItems
   }).select().single()
   if (error) throw createError({ statusCode: 500, statusMessage: error.message })
 
@@ -92,30 +117,37 @@ export default defineEventHandler(async (event) => {
   return { ...msg, quotation_id: quotationId }
 })
 
-async function resolveScopeLabels(
+async function persistMatchLogs(
   client: Awaited<ReturnType<typeof userClient>>,
-  scope: { documentId?: string | null; vendorId?: string | null }
+  tenantId: string,
+  result: Awaited<ReturnType<typeof searchItems>>,
+  highConfidence: Array<{ doc_price_item_id: string | null; doc_item_id: string | null }>
 ) {
-  const labels: { documentName?: string | null; vendorName?: string | null } = {}
+  const selected = new Set(highConfidence.map(item => item.doc_price_item_id ?? item.doc_item_id).filter(Boolean))
+  const rows = result.explanations.flatMap((explanation: any) => {
+    const candidate = explanation.best_candidate
+    const id = candidate?.doc_price_item_id ?? candidate?.doc_item_id
+    if (!candidate || !id) return []
+    return [{
+      tenant_id: tenantId,
+      query: explanation.query,
+      normalized_query: explanation.query.toLowerCase().replace(/\s+/g, ' ').trim(),
+      doc_price_item_id: candidate.doc_price_item_id,
+      legacy_doc_item_id: candidate.doc_item_id,
+      confidence_score: explanation.confidence_score,
+      confidence_label: explanation.confidence_label,
+      matched_fields: explanation.matched_fields,
+      missing_fields: explanation.missing_fields,
+      conflicting_fields: explanation.conflicting_fields,
+      aliases_used: explanation.aliases_used,
+      needs_review: explanation.needs_review,
+      selected_for_quotation: selected.has(id)
+    }]
+  })
+  if (!rows.length) return
 
-  if (scope.documentId) {
-    const { data } = await client
-      .from('documents')
-      .select('filename, vendor:vendor_id(name)')
-      .eq('id', scope.documentId)
-      .maybeSingle()
-    labels.documentName = data?.filename ?? null
-    labels.vendorName = (data as any)?.vendor?.name ?? labels.vendorName ?? null
+  const { error } = await client.from('search_match_logs').insert(rows)
+  if (error) {
+    console.warn('Could not persist search match logs', error.message)
   }
-
-  if (scope.vendorId && !labels.vendorName) {
-    const { data } = await client
-      .from('vendors')
-      .select('name')
-      .eq('id', scope.vendorId)
-      .maybeSingle()
-    labels.vendorName = data?.name ?? null
-  }
-
-  return labels
 }

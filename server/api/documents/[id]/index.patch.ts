@@ -13,6 +13,8 @@ async function ensureVendorByName(params: {
     .from('vendors')
     .select('id, name')
     .eq('name', params.name)
+    .order('created_at', { ascending: true })
+    .limit(1)
     .maybeSingle()
   if (existing) return existing
 
@@ -32,6 +34,16 @@ export default defineEventHandler(async (event) => {
   const id = getRouterParam(event, 'id')!
   const body = Body.parse(await readBody(event))
   const client = await userClient(event)
+  const { data: doc, error: docError } = await client
+    .from('documents')
+    .select('owner_id')
+    .eq('id', id)
+    .single()
+  if (docError || !doc) throw createError({ statusCode: 404, statusMessage: 'Document not found' })
+  if (doc.owner_id !== user.id) {
+    throw createError({ statusCode: 403, statusMessage: 'Only the uploader can edit this document.' })
+  }
+
   const vendor = await ensureVendorByName({
     client,
     ownerId: user.id,

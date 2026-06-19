@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs'
+import { load as loadHtml } from 'cheerio'
 import { PriceRow, type PriceRow as PR } from '~~/shared/schemas'
 
 export interface InternalParseResult {
@@ -17,6 +18,13 @@ interface HeaderMatch {
   unitIdx: number
   priceIdx: number
   moqIdx: number
+}
+
+interface HtmlGridCell {
+  text: string
+  originRow: number
+  originCol: number
+  isHeader: boolean
 }
 
 const NAME_SYNS = ['product', 'item', 'description', 'particulars', 'name', 'material', 'details']
@@ -48,6 +56,7 @@ function parseNumber(v: string | undefined): number | null {
   if (!original) return null
   if (/^\d+(?:\.\d+)?\s*(?:sq\.?\s*mm|mm|mtrs?\.?|met(?:er|re)s?|pair|core|nos?\.?|pcs?\.?)$/i.test(original)) return null
   if (/[+]/.test(original) && !/(?:₹|rs\.?|inr)/i.test(original)) return null
+  if (/[\/]/.test(original) && !/(?:₹|rs\.?|inr|\/-)/i.test(original)) return null
   if (/[a-z]/i.test(original) && !/\b(rs|inr|mrp|rate|each|ea|pc|pcs|nos?|mtrs?|meter|kg|box|coil|roll)\b/i.test(original)) return null
   const cleaned = v
     .replace(/[₹$€,\s]/g, '')
@@ -215,7 +224,7 @@ function parseMiniRateTables(rows: string[][], sourcePage: number | null): PR[] 
         const candidate: PR = {
           raw_name: [sectionTitle, itemKey, rateHeader].filter(Boolean).join(' '),
           sku: itemKey,
-          unit: rateHeader ? `per ${rateHeader}` : null,
+          unit: unitForMatrixCell(sectionTitle, rateHeader),
           price,
           moq: null,
           currency: 'INR',
@@ -288,7 +297,7 @@ function parseGroupedMatrixTables(rows: string[][], sourcePage: number | null): 
           const candidate: PR = {
             raw_name: [group.title, rowQualifier, variant].filter(Boolean).join(' '),
             sku: rowQualifier || null,
-            unit: variant,
+            unit: unitForMatrixCell(group.title, variant),
             price,
             moq: null,
             currency: 'INR',
@@ -306,7 +315,17 @@ function parseGroupedMatrixTables(rows: string[][], sourcePage: number | null): 
 
 function firstMatrixQualifier(row: string[], headerRow: string[], start: number): string {
   const direct = normaliseCell(row[start])
-  if (direct && parseMatrixPrice(direct) === null) return direct
+  const directHeader = normaliseCell(headerRow[start])
+  if (
+    direct
+    && (
+      isDescriptorHeader(directHeader)
+      || looksLikeDimensionOnly(direct)
+      || parseMatrixPrice(direct) === null
+    )
+  ) {
+    return direct
+  }
 
   for (let col = start + 1; col < Math.min(row.length, start + 4); col++) {
     const header = normaliseCell(headerRow[col])
@@ -351,6 +370,13 @@ function parseMatrixPrice(value: string | undefined) {
   return parseNumber(text)
 }
 
+function unitForMatrixCell(sectionTitle: string, variant: string) {
+  const combined = `${sectionTitle} ${variant}`
+  if (/\bcoil|roll\b/i.test(combined)) return 'per coil'
+  if (/\bcore\b/i.test(variant) && /\b(cables?|conductor|xlpe|pvc)\b/i.test(sectionTitle)) return 'per meter'
+  return variant ? `per ${variant}` : null
+}
+
 function parseInlineSectionRateRows(rows: string[][], sourcePage: number | null): PR[] {
   const out: PR[] = []
   let sectionTitle = ''
@@ -387,7 +413,7 @@ function parseInlineSectionRateLine(sectionTitle: string, line: string, sourcePa
     const candidate: PR = {
       raw_name: [sectionTitle, itemKey, rateHeader].filter(Boolean).join(' '),
       sku: itemKey,
-      unit: `per ${rateHeader}`,
+      unit: unitForMatrixCell(sectionTitle, rateHeader),
       price,
       moq: null,
       currency: 'INR',
@@ -445,7 +471,7 @@ function parseSideBySideMiniRateTables(rows: string[][], sourcePage: number | nu
           const candidate: PR = {
             raw_name: [group.title, itemKey, rateHeader].filter(Boolean).join(' '),
             sku: itemKey,
-            unit: rateHeader ? `per ${rateHeader}` : null,
+            unit: unitForMatrixCell(group.title, rateHeader),
             price,
             moq: null,
             currency: 'INR',
@@ -474,6 +500,280 @@ function dedupeRows(rows: PR[]): PR[] {
     seen.add(key)
     return true
   })
+}
+
+function clampSpan(value: string | undefined, fallback = 1) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 && parsed < 100 ? parsed : fallback
+}
+
+function uniqueNonEmpty(values: string[]) {
+  return [...new Set(values.map(normaliseCell).filter(Boolean))]
+}
+
+function meaningfulParts(values: string[]) {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const value of values.map(normaliseCell).filter(Boolean)) {
+    const key = value.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(value)
+  }
+  return out
+}
+
+function isUnavailableCell(value: string | undefined) {
+  return /^[-–—]+$/.test(normaliseCell(value))
+}
+
+function tableToGrid($: ReturnType<typeof loadHtml>, table: any): HtmlGridCell[][] {
+  const grid: HtmlGridCell[][] = []
+
+  $(table).find('tr').each((rowIndex, tr) => {
+    const row = grid[rowIndex] ?? []
+    grid[rowIndex] = row
+    let colIndex = 0
+
+    $(tr).children('th,td').each((_, cell) => {
+      while (row[colIndex]) colIndex++
+
+      const cellElement = $(cell)
+      const text = normaliseCell(cellElement.text())
+      const rowSpan = clampSpan(cellElement.attr('rowspan'))
+      const colSpan = clampSpan(cellElement.attr('colspan'))
+      const isHeader = String((cell as any).tagName ?? '').toLowerCase() === 'th'
+      const gridCell: HtmlGridCell = {
+        text,
+        originRow: rowIndex,
+        originCol: colIndex,
+        isHeader
+      }
+
+      for (let r = rowIndex; r < rowIndex + rowSpan; r++) {
+        const targetRow = grid[r] ?? []
+        grid[r] = targetRow
+        for (let c = colIndex; c < colIndex + colSpan; c++) {
+          targetRow[c] = gridCell
+        }
+      }
+
+      colIndex += colSpan
+    })
+  })
+
+  const width = Math.max(0, ...grid.map(row => row.length))
+  for (let rowIndex = 0; rowIndex < grid.length; rowIndex++) {
+    const row = grid[rowIndex] ?? []
+    for (let colIndex = 0; colIndex < width; colIndex++) {
+      row[colIndex] ??= {
+        text: '',
+        originRow: rowIndex,
+        originCol: colIndex,
+        isHeader: false
+      }
+    }
+  }
+
+  return grid
+}
+
+function isSectionRow(row: HtmlGridCell[], rowIndex: number) {
+  const currentTexts = uniqueNonEmpty(row
+    .filter(cell => cell.originRow === rowIndex)
+    .map(cell => cell.text))
+  if (currentTexts.length !== 1) return null
+
+  const title = currentTexts[0]!
+  const occupied = row.filter(cell => cell.originRow === rowIndex && cell.text === title).length
+  if (occupied < Math.max(1, Math.floor(row.length * 0.45))) return null
+  if (looksLikeSectionTitleCell(title) || row.some(cell => cell.isHeader && cell.originRow === rowIndex)) {
+    return title
+  }
+  if (rowIndex === 0 && title.length >= 8 && /[a-z]/i.test(title)) return title
+  return null
+}
+
+function headerContextForColumn(
+  grid: HtmlGridCell[][],
+  rowIndex: number,
+  colIndex: number,
+  sectionStart: number
+) {
+  const values: string[] = []
+  for (let r = sectionStart; r < rowIndex; r++) {
+    const cell = grid[r]?.[colIndex]
+    if (!cell?.text || cell.originRow !== r) continue
+    if (isUnavailableCell(cell.text)) continue
+    if (parseNumber(cell.text) !== null && !/[a-z]/i.test(cell.text) && !looksLikeDimensionOnly(cell.text)) continue
+    values.push(cell.text)
+  }
+  return meaningfulParts(values)
+}
+
+function headerTextLooksLikePriceColumn(text: string) {
+  return /\b(rate|price|mrp|amount|cost|unarmou?red|armou?red|screened|jellyfilled|single\s*core|\d+(?:\.\d+)?\s*core|mtrs?\.?|meters?|coil|sq\.?\s*mm|mm\.?)\b/i
+    .test(text)
+}
+
+function headerTextLooksLikeSpecColumn(text: string) {
+  const normalized = normaliseHeader(text)
+  if (!normalized) return false
+  return /\b(?:beam\s*angle|viewing\s*angle|lumens?|lumen|watt(?:age)?|watts?|cct|cri|ip|pf|power\s*factor|voltage|volt|hz|led\s*type|ledtype|cut\s*out|cutout|dimension|diameter|height|width|length|body\s*color|body\s*colour|color|colour|finish|material|image|photo)\b/.test(normalized)
+}
+
+function headerTextLooksLikeDescriptorOnly(text: string) {
+  const normalized = normaliseHeader(text)
+  return /^(cond|conductor|cond const|amps?|no of pair size|no of pair|item|items?|description|size|sizes?|sku|code)$/.test(normalized)
+    || headerTextLooksLikeSpecColumn(text)
+}
+
+function isHtmlPriceCell(
+  grid: HtmlGridCell[][],
+  rowIndex: number,
+  colIndex: number,
+  sectionStart: number
+) {
+  const cell = grid[rowIndex]?.[colIndex]
+  if (!cell || cell.originRow !== rowIndex || !cell.text || isUnavailableCell(cell.text)) return false
+  if (looksLikeDimensionOnly(cell.text)) return false
+
+  const price = parseNumber(cell.text)
+  if (price === null) return false
+  if (/[a-z]/i.test(cell.text) && !/(?:₹|rs\.?|inr)/i.test(cell.text)) return false
+
+  const headerText = headerContextForColumn(grid, rowIndex, colIndex, sectionStart).join(' ')
+  if (headerTextLooksLikeSpecColumn(headerText)) return false
+  if (headerTextLooksLikeDescriptorOnly(headerText) && !headerTextLooksLikePriceColumn(headerText)) return false
+  if (price < 100 && !/\b(rate|price|mrp|amount|cost)\b/i.test(headerText)) return false
+
+  const row = grid[rowIndex] ?? []
+  const currentLeftText = row
+    .slice(0, colIndex)
+    .filter(left => left.originRow === rowIndex && left.text && !isUnavailableCell(left.text))
+    .map(left => left.text)
+  const hasPriceHeader = headerTextLooksLikePriceColumn(headerText)
+  if (hasPriceHeader) return true
+
+  const cellsToRight = row
+    .slice(colIndex + 1)
+    .filter(right => right.originRow === rowIndex && right.text && !isUnavailableCell(right.text))
+  if (cellsToRight.length > 1) return false
+
+  return currentLeftText.length > 0 && price >= 1000
+}
+
+function priceGroupsForRow(grid: HtmlGridCell[][], rowIndex: number, sectionStart: number) {
+  const row = grid[rowIndex] ?? []
+  const groups: number[][] = []
+  let current: number[] = []
+
+  for (let col = 0; col < row.length; col++) {
+    if (isHtmlPriceCell(grid, rowIndex, col, sectionStart)) {
+      current.push(col)
+    } else if (current.length) {
+      groups.push(current)
+      current = []
+    }
+  }
+  if (current.length) groups.push(current)
+  return groups
+}
+
+function rowDescriptorForGroup(
+  grid: HtmlGridCell[][],
+  rowIndex: number,
+  group: number[],
+  previousGroupEnd: number,
+  sectionStart: number
+) {
+  const row = grid[rowIndex] ?? []
+  const start = group[0] ?? 0
+  const rangeStart = previousGroupEnd + 1
+  const local = row
+    .slice(rangeStart, start)
+    .filter(cell => cell.originRow === rowIndex && cell.text && !isUnavailableCell(cell.text))
+    .map(cell => cell.text)
+
+  const prefix = row
+    .slice(0, start)
+    .filter((cell, index) =>
+      index < start
+      && cell.originRow === rowIndex
+      && cell.text
+      && !isUnavailableCell(cell.text)
+      && !isHtmlPriceCell(grid, rowIndex, index, sectionStart)
+    )
+    .map(cell => cell.text)
+
+  const descriptor = local.length ? local : prefix
+  return meaningfulParts(descriptor).join(' ')
+}
+
+function parseHtmlGridPriceRows(grid: HtmlGridCell[][], sourcePage: number | null = null): PR[] {
+  const out: PR[] = []
+  let sectionTitle = ''
+  let sectionStart = 0
+
+  for (let rowIndex = 0; rowIndex < grid.length; rowIndex++) {
+    const row = grid[rowIndex] ?? []
+    const title = isSectionRow(row, rowIndex)
+    if (title) {
+      sectionTitle = title
+      if (rowIndex === 0 || row.some(cell => cell.isHeader && cell.originRow === rowIndex)) {
+        sectionStart = rowIndex + 1
+      }
+      continue
+    }
+
+    const groups = priceGroupsForRow(grid, rowIndex, sectionStart)
+    if (!groups.length) continue
+
+    let previousGroupEnd = -1
+    for (const group of groups) {
+      const rowDescriptor = rowDescriptorForGroup(grid, rowIndex, group, previousGroupEnd, sectionStart)
+      previousGroupEnd = group[group.length - 1] ?? previousGroupEnd
+      if (!rowDescriptor && !sectionTitle) continue
+      if (/^(item|items?|description|sku|code|size|sizes?)$/i.test(rowDescriptor)) continue
+
+      for (const colIndex of group) {
+        const cell = grid[rowIndex]?.[colIndex]
+        const price = parseNumber(cell?.text)
+        if (price === null) continue
+
+        const columnContext = headerContextForColumn(grid, rowIndex, colIndex, sectionStart)
+          .filter(value => value.toLowerCase() !== sectionTitle.toLowerCase())
+        const columnLabel = columnContext.join(' ')
+        const rawName = meaningfulParts([sectionTitle, rowDescriptor, columnLabel]).join(' ')
+        if (!rawName || !/[a-z0-9]/i.test(rawName)) continue
+
+        const candidate: PR = {
+          raw_name: rawName,
+          sku: rowDescriptor || null,
+          unit: unitForMatrixCell(sectionTitle, columnLabel),
+          price,
+          moq: null,
+          currency: 'INR',
+          source_page: sourcePage
+        }
+        const parsed = PriceRow.safeParse(candidate)
+        if (parsed.success) out.push(parsed.data)
+      }
+    }
+  }
+
+  return dedupeRows(out)
+}
+
+export function parsePriceRowsFromHtmlTables(markdown: string, sourcePage: number | null = null): PR[] {
+  if (!/<table[\s>]/i.test(markdown)) return []
+
+  const $ = loadHtml(markdown)
+  const rows: PR[] = []
+  $('table').each((_, table) => {
+    rows.push(...parseHtmlGridPriceRows(tableToGrid($, table), sourcePage))
+  })
+  return dedupeRows(rows)
 }
 
 function parseDelimited(text: string): string[][] {
