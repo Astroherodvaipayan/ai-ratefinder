@@ -46,7 +46,14 @@ const KNOWN_UNITS = new Set([
 ])
 const PRODUCT_STOP = new Set([
   'add', 'and', 'as', 'for', 'give', 'line', 'lines', 'need', 'per', 'please', 'price', 'prices',
-  'qty', 'quantity', 'quote', 'rate', 'rates', 'show', 'to', 'what', 'wire', 'wires', 'bundle', 'bundles', 'bdl'
+  'item', 'qty', 'quantity', 'quote', 'rate', 'rates', 'show', 'to', 'what', 'wire', 'wires', 'bundle', 'bundles', 'bdl'
+])
+const CATALOGUE_CODE_RE = /\b(?=[A-Z0-9./-]{5,}\b)(?=[A-Z0-9./-]*[A-Z])(?=[A-Z0-9./-]*\d)[A-Z0-9][A-Z0-9]*(?:[./-][A-Z0-9]+)*\b/gi
+const SPACED_CATALOGUE_CODE_RE = /\b([A-Z]{2,8})\s+(\d{2,}[A-Z0-9]*|\d+[A-Z][A-Z0-9]*)(?:\s+([A-Z]{1,3}))?\b/gi
+const NON_CODE_PREFIXES = new Set([
+  'APRIL', 'AUGUST', 'CABEL', 'CABLE', 'DECEMBER', 'FEBRUARY', 'FR', 'FRLS', 'FRLSH',
+  'HFFR', 'IEC', 'IS', 'JANUARY', 'JULY', 'JUNE', 'MARCH', 'MAY', 'MM', 'MTR',
+  'NOVEMBER', 'OCTOBER', 'PVC', 'SEPTEMBER', 'SQ', 'WIRE', 'WIRES', 'XLPE', 'ZHFR'
 ])
 
 function splitCompactForms(value: string) {
@@ -147,13 +154,26 @@ export function parseUserItemQuery(rawQuery: string): ParsedUserItemQuery {
     if (Number.isFinite(second)) numeric_values.push(second)
   }
 
+  for (const match of matchSource.matchAll(/\b(\d+)\s*ways?\b/gi)) {
+    const value = Number(match[1])
+    if (!Number.isFinite(value)) continue
+    numeric_values.push(value)
+    attribute_hints.push({
+      name: 'way',
+      value: String(value),
+      raw: match[0]!
+    })
+  }
+
   const tokens = tokenize(normalizedMatch)
+  const catalogueCodes = extractCatalogueCodes(matchSource)
   const product_terms = uniqueText(tokens.filter(token =>
     !PRODUCT_STOP.has(token)
     && !KNOWN_UNITS.has(token)
     && !/^\d+(?:\.\d+)?$/.test(token)
     && !/^[.\d]+$/.test(token)
-  ))
+    && !isQueryNoiseTerm(token)
+  ).concat(catalogueCodes))
 
   const explicitPerUnit = expanded.match(new RegExp(`\\bper\\s+(${QUERY_UNIT_RE_PART})\\b`, 'i'))?.[1]
   const requestedUnit = explicitPerUnit ? normalizeUnitToken(explicitPerUnit) : null
@@ -226,4 +246,32 @@ function removeRequestedQuantities(expanded: string, requestedQuantities: Parsed
     out = out.replace(quantity.raw, ' ')
   }
   return out.replace(/\s+/g, ' ').trim()
+}
+
+function extractCatalogueCodes(value: string) {
+  const compactCodes = [...value.matchAll(CATALOGUE_CODE_RE)]
+    .map(match => match[0])
+    .filter(code => {
+      const normalized = normalizeSearchText(code)
+      if (!normalized || KNOWN_UNITS.has(normalized)) return false
+      if (isQueryNoiseTerm(code)) return false
+      if (/^\d+(?:\.\d+)?(?:sq\.?\s*mm|sqmm|mm|mtrs?|met(?:er|re)s?|cores?|core|c|pairs?|pair)$/i.test(code)) return false
+      if (/^(?:frls?h?|hffr|zhfr)\s*\d+$/i.test(code)) return false
+      return true
+    })
+
+  const spacedCodes = [...value.matchAll(SPACED_CATALOGUE_CODE_RE)]
+    .flatMap(match => {
+      const prefix = match[1]!.toUpperCase()
+      if (NON_CODE_PREFIXES.has(prefix)) return []
+      const body = `${match[2] ?? ''}${match[3] ?? ''}`.toUpperCase()
+      if (!/[A-Z]/.test(body) && prefix.length < 3) return []
+      return `${prefix}${body}`
+    })
+
+  return uniqueText([...compactCodes, ...spacedCodes])
+}
+
+function isQueryNoiseTerm(value: string) {
+  return /(?:\.pdf|^per\d+$|^sizesq\.?$|^rate(?:pc|mtr)?\.?$|^(?:dt\.?)?\d{1,2}[-./]\d{1,2}[-./]\d{4}(?:\.pdf)?$)/i.test(value)
 }

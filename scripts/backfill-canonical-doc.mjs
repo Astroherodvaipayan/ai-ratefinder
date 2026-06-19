@@ -46,7 +46,9 @@ const tables = htmlTables.map((table, index) => {
 })
 
 const legacyRows = await loadLegacyRows(documentId)
-if (!tables.length && legacyRows.length) {
+const extractedPriceRecordCount = countPriceRecords(tables)
+if ((!tables.length || extractedPriceRecordCount === 0) && legacyRows.length) {
+  tables.length = 0
   tables.push(...canonicalizeExtractedRows({
     rows: legacyRows,
     documentTitle: doc.filename,
@@ -55,6 +57,18 @@ if (!tables.length && legacyRows.length) {
     parserConfidence: 0.72,
     ocrConfidence: null
   }))
+} else if (process.env.BACKFILL_INCLUDE_LEGACY_SUPPLEMENT === '1' || shouldUseGuardedLegacySupplement(doc, legacyRows, extractedPriceRecordCount)) {
+  const supplementalRows = legacyRowsForSupplement(legacyRows)
+  if (supplementalRows.length) {
+    tables.push(...canonicalizeExtractedRows({
+      rows: supplementalRows,
+      documentTitle: doc.filename,
+      vendorName: doc.vendor?.name,
+      parserName: 'legacy-doc-items-supplement',
+      parserConfidence: 0.68,
+      ocrConfidence: null
+    }))
+  }
 }
 
 if (!tables.length) {
@@ -215,6 +229,59 @@ function groupLegacyRowsByPage(rows) {
   return grouped
 }
 
+function legacyRowsForSupplement(rows) {
+  const priceSetsByIdentity = new Map()
+  for (const row of rows) {
+    const key = legacyIdentityKey(row)
+    if (!key) continue
+    priceSetsByIdentity.set(key, priceSetsByIdentity.get(key) ?? new Set())
+    priceSetsByIdentity.get(key).add(Number(row.price))
+  }
+
+  return rows.filter(row => {
+    const price = Number(row.price)
+    if (!Number.isFinite(price) || price <= 0 || price > 10_000_000) return false
+
+    const name = String(row.raw_name ?? '').trim()
+    if (name.length < 3) return false
+    if (/^(?:sr\.?\s*no|s\.?\s*no|page|phone|mobile|tel|contact)\b/i.test(name)) return false
+
+    const unit = String(row.unit ?? '').trim()
+    if (/^per\s+\d{2,}/i.test(unit)) return false
+    if (/^\d{6,}$/.test(String(row.sku ?? '').trim())) return false
+
+    const key = legacyIdentityKey(row)
+    const sameIdentityPrices = key ? priceSetsByIdentity.get(key) : null
+    const hasSizeToken = /\b\d+(?:\.\d+)?\s*(?:sq\.?\s*mm|sqmm|mm)\b/i.test(`${name} ${row.sku ?? ''}`)
+    if (sameIdentityPrices && sameIdentityPrices.size > 1 && !hasSizeToken) return false
+
+    return true
+  })
+}
+
+function shouldUseGuardedLegacySupplement(doc, rows, extractedPriceRecordCount) {
+  if (!rows.length) return false
+  const label = `${doc.vendor?.name ?? ''} ${doc.filename ?? ''}`.toLowerCase()
+  if (label.includes('precision')) return false
+  if (label.includes('hills')) return false
+
+  const cleanRows = legacyRowsForSupplement(rows)
+  if (!cleanRows.length) return false
+  if (/(?:legrand)/i.test(label) && extractedPriceRecordCount < rows.length) return true
+
+  return extractedPriceRecordCount < 10
+    && rows.length <= 50
+    && cleanRows.length >= Math.max(1, rows.length * 0.7)
+}
+
+function legacyIdentityKey(row) {
+  const value = `${row.raw_name ?? ''} ${row.sku ?? ''} ${row.unit ?? ''}`
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+  return value || null
+}
+
 async function checked(query, action) {
   const { error } = await query
   if (!error) return
@@ -222,6 +289,30 @@ async function checked(query, action) {
     throw new Error(`${action} failed because Supabase PostgREST has not reloaded the schema cache. Run: notify pgrst, 'reload schema';`)
   }
   throw error
+}
+
+function countPriceRecords(tables) {
+  let count = 0
+  for (const table of tables) {
+    for (const cell of table.cells) {
+      if (!cell.is_price) continue
+      const record = priceCellToRecord({
+        tenant_id: doc.owner_id,
+        document_id: doc.id,
+        vendor_id: doc.vendor_id,
+        vendor_name: doc.vendor?.name,
+        document_title: doc.filename,
+        source_uploaded_at: doc.created_at,
+        legacy_doc_item_id: null,
+        source_table_id: null,
+        source_cell_id: null,
+        table,
+        cell
+      })
+      if (record) count += 1
+    }
+  }
+  return count
 }
 
 async function deleteRowsByDocument(table, documentId) {

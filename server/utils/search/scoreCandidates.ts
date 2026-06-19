@@ -38,6 +38,7 @@ const WEIGHTS = {
 const IDENTITY_STOP = new Set([
   'a', 'and', 'as', 'code', 'for', 'hsn', 'is', 'per', 'price', 'rate', 'the'
 ])
+const CATALOGUE_CODE_TERM_RE = /^(?=[a-z0-9./-]{5,}$)(?=.*[a-z])(?=.*\d)[a-z0-9][a-z0-9]*(?:[./-][a-z0-9]+)*$/i
 
 const PRODUCT_FAMILY_REQUIREMENTS: Array<{
   label: string
@@ -53,9 +54,9 @@ const PRODUCT_FAMILY_REQUIREMENTS: Array<{
   },
   {
     label: 'junction',
-    query: ['junction', 'way'],
-    candidate: ['junction', 'way'],
-    conflict: ['cable', 'conductor', 'current', 'amps', 'wire']
+    query: ['junction'],
+    candidate: ['junction'],
+    conflict: ['cable', 'conductor', 'current', 'amps', 'socket', 'switch', 'wire']
   },
   {
     label: 'coupler',
@@ -84,6 +85,10 @@ const PRODUCT_FAMILY_REQUIREMENTS: Array<{
 ]
 
 const PIPE_FITTING_TERMS = ['bend', 'clip', 'coupler', 'elbow', 'junction', 'tee', 'connector', 'valve', 'trap']
+const WEAK_GENERIC_TERMS = new Set([
+  'axial', 'cable', 'cables', 'category', 'co', 'coil', 'conductor', 'item', 'pipe', 'pipes',
+  'product', 'rate', 'table', 'wire', 'wires'
+])
 const NON_PRICE_SPEC_TERMS = [
   'outside diameter',
   'inside diameter',
@@ -235,6 +240,20 @@ function numericIdentityTokens(value: string) {
   return out
 }
 
+function queryCatalogueCodes(parsed: ParsedUserItemQuery) {
+  const structuredCodes = parsed.product_terms
+    .filter(term => CATALOGUE_CODE_TERM_RE.test(term))
+    .map(value => compactText(value))
+    .filter(code => !/^(?:dt|date)?\d{6,8}$/.test(code))
+    .filter(Boolean)
+  if (structuredCodes.length) return uniqueIdentityTokens(structuredCodes)
+
+  return uniqueIdentityTokens([...parsed.raw_query.matchAll(/\b\d{5,}\b/g)]
+    .map(match => compactText(match[0]!))
+    .filter(code => !/^(?:19|20)\d{2}$/.test(code))
+    .filter(Boolean))
+}
+
 function labelFor(score: number): ScoredCandidate['confidence_label'] {
   if (score >= 0.85) return 'Matched'
   if (score >= 0.65) return 'Needs review'
@@ -257,6 +276,33 @@ function looksLikeNonPriceSpec(candidate: PriceCandidate) {
 
   const hasPriceSignal = PRICE_SIGNAL_TERMS.some(term => tokenAwareMatch(identity, term))
   return !hasPriceSignal
+}
+
+function hasWeakGenericQueryIdentity(parsed: ParsedUserItemQuery) {
+  if (parsed.attribute_hints.length || queryCatalogueCodes(parsed).length) return false
+  if (!parsed.product_terms.length) return true
+  return parsed.product_terms.every(term => WEAK_GENERIC_TERMS.has(normalizeSearchText(term)))
+}
+
+function precisionUnrequestedVariant(candidate: PriceCandidate, parsed: ParsedUserItemQuery) {
+  const sku = normalizeSearchText(candidate.sku_text)
+  if (!sku) return null
+  const queryText = normalizeSearchText(parsed.normalized_query)
+
+  if (/\bprcs\s*\d+\s*mni\b/.test(sku) && !/\b(?:mni|non\s*isi|nonisi)\b/.test(queryText)) {
+    return 'variant:mni'
+  }
+
+  const junction = sku.match(/\bprcb\s*\d{3}\s*([a-z]+)\b/)
+  if (junction?.[1] && !/\b(?:deep|large|long|lid|box|bol|d|l|dl|sd|bo)\b/.test(queryText)) {
+    return `variant:${junction[1]}`
+  }
+
+  if (/\bpcr\s*\d+\s*l\b/.test(sku) && !/\b(?:long|large|l)\b/.test(queryText)) {
+    return 'variant:l'
+  }
+
+  return null
 }
 
 export function scoreCandidate(params: {
@@ -296,6 +342,8 @@ export function scoreCandidate(params: {
     candidate.row_headers.join(' '),
     candidate.column_headers.join(' ')
   ].filter(Boolean).join(' '))
+  const compactCandidateIdentity = compactText(candidateIdentityText)
+  let hasCatalogueCodeMatch = false
 
   const attrs = attributeMatches(parsed, candidate)
   if (parsed.attribute_hints.length) {
@@ -345,6 +393,22 @@ export function scoreCandidate(params: {
     if (matchedTerms.length) matched_fields.push(`terms:${matchedTerms.join(',')}`)
     const missingTerms = productTokens.filter(term => !matchedTerms.includes(term))
     if (missingTerms.length) missing_fields.push(`terms:${missingTerms.join(',')}`)
+  }
+
+  const catalogueCodes = queryCatalogueCodes(parsed)
+  if (catalogueCodes.length) {
+    const matchedCodes = catalogueCodes.filter(code =>
+      compactCandidateIdentity.includes(code)
+      || compactSearchable.includes(code)
+    )
+    if (matchedCodes.length) {
+      hasCatalogueCodeMatch = true
+      score += Math.min(0.22, 0.16 + matchedCodes.length * 0.03)
+      matched_fields.push(`catalogue_code:${matchedCodes.join(',')}`)
+    } else {
+      score = Math.min(score, 0.64)
+      missing_fields.push(`catalogue_code:${catalogueCodes.join(',')}`)
+    }
   }
 
   if (containsAny(rowText, productTokens)) {
@@ -439,6 +503,18 @@ export function scoreCandidate(params: {
     matched_fields.push('exact_structured_match')
   }
 
+  if (
+    parsed.attribute_hints.length === 1
+    && parsed.product_terms.length > 0
+    && attrs.matched.length === parsed.attribute_hints.length
+    && attrs.missing.length === 0
+    && attrs.conflicting.length === 0
+    && productMatchRatio >= 1
+  ) {
+    score += 0.15
+    matched_fields.push('exact_structured_match')
+  }
+
   const aliasesUsed = params.aliasesUsed ?? []
   if (aliasesUsed.length) {
     const minAlias = Math.min(...aliasesUsed.map(alias => alias.confidence))
@@ -460,6 +536,13 @@ export function scoreCandidate(params: {
     && missing_fields.some(field => field.startsWith('terms:') || field === 'numeric_identity')
   ) {
     score = Math.min(score, 0.84)
+  }
+  if (missing_fields.some(field => field.startsWith('catalogue_code:'))) {
+    score = Math.min(score, 0.64)
+  }
+  if (hasWeakGenericQueryIdentity(parsed)) {
+    score = Math.min(score, 0.64)
+    missing_fields.push('specific_identity')
   }
   if (/\bper meter\b/.test(normalizeSearchText(parsed.normalized_query)) && /\bcoil\b/.test(candidateIdentityText)) {
     score -= 0.12
@@ -502,9 +585,14 @@ export function scoreCandidate(params: {
     score = Math.min(score - 0.35, 0.34)
     conflicting_fields.push(...familyConflicts)
   }
-  if (looksLikeNonPriceSpec(candidate)) {
+  if (!hasCatalogueCodeMatch && looksLikeNonPriceSpec(candidate)) {
     score = Math.min(score, 0.49)
     conflicting_fields.push('non_price_spec_value')
+  }
+  const unrequestedVariant = precisionUnrequestedVariant(candidate, parsed)
+  if (unrequestedVariant) {
+    score -= 0.14
+    conflicting_fields.push(unrequestedVariant)
   }
   score -= params.duplicatePenalty ?? 0
   score = Math.max(0, Math.min(1, Number(score.toFixed(4))))
@@ -545,6 +633,15 @@ function candidateSpecificityLength(candidate: PriceCandidate) {
   ].filter(Boolean).join(' '))).length
 }
 
+function variantConflictCount(item: ScoredCandidate) {
+  return item.conflicting_fields.filter(field => field.startsWith('variant:')).length
+}
+
+function samePriceAndUnit(a: ScoredCandidate, b: ScoredCandidate) {
+  return Math.abs(a.candidate.normalized_price - b.candidate.normalized_price) < 0.0001
+    && normalizeUnit(a.candidate.unit) === normalizeUnit(b.candidate.unit)
+}
+
 export function scoreCandidates(params: {
   parsed: ParsedUserItemQuery
   candidates: PriceCandidate[]
@@ -579,6 +676,7 @@ export function scoreCandidates(params: {
     })
     .sort((a, b) =>
       b.score - a.score
+      || variantConflictCount(a) - variantConflictCount(b)
       || candidateSpecificityLength(a.candidate) - candidateSpecificityLength(b.candidate)
       || (b.candidate.source_confidence - a.candidate.source_confidence)
       || String(b.candidate.source_uploaded_at ?? '').localeCompare(String(a.candidate.source_uploaded_at ?? ''))
@@ -592,16 +690,32 @@ function applyAmbiguityCaps(scored: ScoredCandidate[]) {
   const [best, ...rest] = scored
   if (!best || best.score < 0.85) return scored
 
+  const bestHasVariantConflict = variantConflictCount(best) > 0
+  const duplicateIdentityGroup = rest.filter(item =>
+    item.score >= 0.85
+    && normalizeSearchText(item.candidate.description_text || item.candidate.product_text)
+      === normalizeSearchText(best.candidate.description_text || best.candidate.product_text)
+  )
+  if (duplicateIdentityGroup.some(item => !samePriceAndUnit(best, item))) {
+    return capAmbiguous(scored, duplicateIdentityGroup.length)
+  }
+
   const nearAlternatives = rest.filter(item =>
     item.score >= 0.85
     && best.score - item.score <= 0.08
+    && (bestHasVariantConflict || variantConflictCount(item) === 0)
+    && !samePriceAndUnit(best, item)
     && normalizeSearchText(item.candidate.description_text || item.candidate.product_text)
       !== normalizeSearchText(best.candidate.description_text || best.candidate.product_text)
   )
   if (!nearAlternatives.length) return scored
 
+  return capAmbiguous(scored, nearAlternatives.length)
+}
+
+function capAmbiguous(scored: ScoredCandidate[], alternativeCount: number) {
   return scored.map((item, index) => {
-    if (index > nearAlternatives.length) return item
+    if (index > alternativeCount) return item
     const cappedScore = Math.min(item.score, 0.84)
     return {
       ...item,
@@ -612,6 +726,7 @@ function applyAmbiguityCaps(scored: ScoredCandidate[]) {
     }
   }).sort((a, b) =>
     b.score - a.score
+    || variantConflictCount(a) - variantConflictCount(b)
     || candidateSpecificityLength(a.candidate) - candidateSpecificityLength(b.candidate)
     || String(a.candidate.doc_price_item_id ?? a.candidate.doc_item_id).localeCompare(String(b.candidate.doc_price_item_id ?? b.candidate.doc_item_id))
   )

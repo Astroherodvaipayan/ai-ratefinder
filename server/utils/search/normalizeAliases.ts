@@ -41,6 +41,7 @@ const BUILT_IN_ALIASES: AppliedAlias[] = [
   { alias_text: 'scensior', canonical_text: 'sensor', confidence: 0.86, source: 'full-kitting-workbook', scope: 'global' },
   ...FULL_KITTING_UNIT_ALIASES
 ]
+const CATALOGUE_CODE_TERM_RE = /^(?=[a-z0-9./-]{5,}$)(?=.*[a-z])(?=.*\d)[a-z0-9][a-z0-9]*(?:[./-][a-z0-9]+)*$/i
 
 async function loadAliases(params: {
   client: SupabaseClient
@@ -112,6 +113,7 @@ export async function normalizeAliases(params: {
       ...params.parsed,
       normalized_query: normalizedQuery,
       product_terms: params.parsed.product_terms.map(term => {
+        if (CATALOGUE_CODE_TERM_RE.test(term)) return term
         let out = normalizeSearchText(term)
         for (const alias of aliases.filter(item => item.confidence >= 0.65)) out = applyAliasText(out, alias)
         return out

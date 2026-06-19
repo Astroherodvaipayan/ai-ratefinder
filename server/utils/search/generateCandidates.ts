@@ -252,7 +252,75 @@ async function canonicalCandidates(
     throw createError({ statusCode: 500, statusMessage: error.message })
   }
   const rpcCandidates = (data ?? []).map((row: any) => normalizeRpcCandidate(row, 'canonical_sql'))
-  return dedupe([...rpcCandidates, ...directCandidates]).slice(0, limit)
+  const initial = dedupe([...rpcCandidates, ...directCandidates]).slice(0, limit)
+  const siblings = await canonicalAmbiguousSiblingCandidates(client, initial, filters, limit)
+  return dedupe([...initial, ...siblings]).slice(0, limit)
+}
+
+function duplicatePriceIdentity(candidate: PriceCandidate) {
+  return normalizeSearchText([
+    candidate.document_id,
+    candidate.source_table_id,
+    candidate.source_page,
+    candidate.table_title,
+    candidate.product_text,
+    candidate.sku_text,
+    candidate.description_text,
+    candidate.row_headers.join(' | '),
+    candidate.column_headers.join(' | '),
+    candidate.parent_headers.join(' | ')
+  ].filter(value => value !== null && value !== undefined).join(' '))
+}
+
+async function canonicalAmbiguousSiblingCandidates(
+  client: SupabaseClient,
+  candidates: PriceCandidate[],
+  filters: CandidateFilters,
+  limit: number
+) {
+  const canonical = candidates.filter(candidate => candidate.doc_price_item_id && candidate.source_table_id)
+  if (!canonical.length) return []
+
+  const wanted = new Map<string, PriceCandidate>()
+  const tableIds = uniqueText(canonical.map(candidate => candidate.source_table_id).filter(Boolean) as string[])
+    .slice(0, 12)
+  for (const candidate of canonical) {
+    wanted.set(duplicatePriceIdentity(candidate), candidate)
+  }
+  if (!tableIds.length || !wanted.size) return []
+
+  let query = client
+    .from('doc_price_items')
+    .select('id, legacy_doc_item_id, document_id, vendor_id, source_page, source_table_id, source_row_index, source_col_index, section_breadcrumb, table_title, row_headers, column_headers, parent_headers, nearby_notes, raw_cell_value, normalized_price, currency, unit, moq, product_text, sku_text, description_text, attributes_json, searchable_text, normalized_search_text, source_confidence, parser_name, source_uploaded_at, documents:document_id(filename, vendor:vendor_id(name))')
+    .in('source_table_id', tableIds)
+    .limit(Math.max(limit * 4, 240))
+  if (filters.documentId) query = query.eq('document_id', filters.documentId)
+  if (filters.vendorId) query = query.eq('vendor_id', filters.vendorId)
+
+  const { data, error } = await query
+  if (error) return []
+
+  const existingIds = new Set(canonical.map(candidate => candidate.doc_price_item_id))
+  const siblings: PriceCandidate[] = []
+  for (const row of data ?? []) {
+    if (existingIds.has(row.id)) continue
+    const document: any = Array.isArray(row.documents) ? row.documents[0] : row.documents
+    const candidate = normalizeRpcCandidate({
+      ...row,
+      doc_price_item_id: row.id,
+      vendor: document?.vendor?.name ?? null,
+      filename: document?.filename ?? '',
+      rank_score: 0.76
+    }, 'canonical_sibling_sql')
+    const siblingOf = wanted.get(duplicatePriceIdentity(candidate))
+    if (!siblingOf) continue
+    siblings.push({
+      ...candidate,
+      recall_score: Math.max(0.7, siblingOf.recall_score - 0.02)
+    })
+  }
+
+  return siblings
 }
 
 async function canonicalDirectCandidates(
@@ -340,6 +408,7 @@ async function canonicalDirectCandidates(
 
   if (usefulTerms.length) {
     const escaped = usefulTerms
+      .flatMap(term => sqlTermVariants(term))
       .flatMap(term => {
         const value = term.replace(/[%(),]/g, '')
         return [
@@ -436,6 +505,7 @@ async function legacyCandidates(
   const fuzzyTask = usefulTerms.length
     ? (async () => {
       const escaped = usefulTerms
+        .flatMap(term => sqlTermVariants(term))
         .flatMap(term => [
           `raw_name.ilike.%${term.replace(/[%(),]/g, '')}%`,
           `sku.ilike.%${term.replace(/[%(),]/g, '')}%`
@@ -500,13 +570,29 @@ function dedupe(candidates: PriceCandidate[]) {
       ? `legacy:${candidate.doc_item_id}`
       : candidate.doc_price_item_id ?? `${candidate.document_id}:${candidate.normalized_search_text}:${candidate.normalized_price}`
     const existing = byId.get(key)
+    const richness = candidateRichness(candidate)
+    const existingRichness = existing ? candidateRichness(existing) : 0
     if (
       !existing
       || (candidate.doc_price_item_id && !existing.doc_price_item_id)
-      || candidate.recall_score > existing.recall_score
+      || richness > existingRichness
+      || (richness === existingRichness && candidate.recall_score > existing.recall_score)
     ) byId.set(key, candidate)
   }
   return [...byId.values()]
+}
+
+function candidateRichness(candidate: PriceCandidate) {
+  return [
+    candidate.attributes_json.length,
+    candidate.row_headers.length,
+    candidate.column_headers.length,
+    candidate.parent_headers.length,
+    candidate.section_breadcrumb.length,
+    candidate.product_text ? 1 : 0,
+    candidate.description_text ? 1 : 0,
+    candidate.source_table_id ? 1 : 0
+  ].reduce((sum, value) => sum + value, 0)
 }
 
 export async function generateCandidates(params: {
