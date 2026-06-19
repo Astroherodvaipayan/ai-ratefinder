@@ -39,6 +39,83 @@ const IDENTITY_STOP = new Set([
   'a', 'and', 'as', 'code', 'for', 'hsn', 'is', 'per', 'price', 'rate', 'the'
 ])
 
+const PRODUCT_FAMILY_REQUIREMENTS: Array<{
+  label: string
+  query: string[]
+  candidate: string[]
+  conflict?: string[]
+}> = [
+  {
+    label: 'conduit_pipe',
+    query: ['conduit', 'pipe', 'mms', 'pvc'],
+    candidate: ['conduit', 'pipe', 'mms', 'pvc'],
+    conflict: ['cable', 'conductor', 'current', 'amps', 'wire']
+  },
+  {
+    label: 'junction',
+    query: ['junction', 'way'],
+    candidate: ['junction', 'way'],
+    conflict: ['cable', 'conductor', 'current', 'amps', 'wire']
+  },
+  {
+    label: 'coupler',
+    query: ['coupler'],
+    candidate: ['coupler'],
+    conflict: ['cable', 'conductor', 'current', 'amps', 'wire']
+  },
+  {
+    label: 'bend',
+    query: ['bend'],
+    candidate: ['bend'],
+    conflict: ['cable', 'conductor', 'current', 'amps', 'wire']
+  },
+  {
+    label: 'solvent_cement',
+    query: ['solvent', 'cement'],
+    candidate: ['solvent', 'cement'],
+    conflict: ['cable', 'conductor', 'current', 'amps', 'wire']
+  },
+  {
+    label: 'fan_box',
+    query: ['fan', 'rod'],
+    candidate: ['fan', 'rod'],
+    conflict: ['cable', 'conductor', 'current', 'amps', 'wire']
+  }
+]
+
+const PIPE_FITTING_TERMS = ['bend', 'clip', 'coupler', 'elbow', 'junction', 'tee', 'connector', 'valve', 'trap']
+const NON_PRICE_SPEC_TERMS = [
+  'outside diameter',
+  'inside diameter',
+  'nominal size',
+  'minimum',
+  'min',
+  'maximum',
+  'max',
+  'thickness',
+  'width',
+  'height',
+  'depth',
+  'current amps',
+  'current',
+  'amps',
+  'ampere',
+  'resistance',
+  'weight',
+  'dimension'
+]
+const PRICE_SIGNAL_TERMS = [
+  'amount',
+  'basic rate',
+  'basic price',
+  'list price',
+  'mrp',
+  'price',
+  'rate',
+  'rs',
+  'inr'
+]
+
 function containsAll(haystack: string, needles: string[]) {
   return needles.length > 0 && needles.every(needle => haystack.includes(normalizeSearchText(needle)))
 }
@@ -59,9 +136,30 @@ function tokenAwareMatch(normalizedHaystack: string, needle: string) {
       || (normalizedNeedle === 'frls' && token === 'frlsh')
       || (normalizedNeedle === 'armored' && token === 'armoured')
       || (normalizedNeedle === 'unarmored' && token === 'unarmoured')
+      || (normalizedNeedle === 'shielded' && token === 'screened')
+      || (normalizedNeedle === 'screened' && token === 'shielded')
     )
   }
   return normalizedHaystack.includes(normalizedNeedle)
+}
+
+function productFamilyConflicts(parsed: ParsedUserItemQuery, candidateIdentityText: string, searchable: string) {
+  const queryText = normalizeSearchText(parsed.product_terms.join(' '))
+  const candidateText = normalizeSearchText(`${candidateIdentityText} ${searchable}`)
+  const conflicts: string[] = []
+
+  for (const family of PRODUCT_FAMILY_REQUIREMENTS) {
+    const queryHits = family.query.filter(term => tokenAwareMatch(queryText, term))
+    if (!queryHits.length) continue
+
+    const candidateHits = family.candidate.filter(term => tokenAwareMatch(candidateText, term))
+    const conflictHits = (family.conflict ?? []).filter(term => tokenAwareMatch(candidateText, term))
+    if (!candidateHits.length || conflictHits.length) {
+      conflicts.push(`product_family:${family.label}`)
+    }
+  }
+
+  return uniqueIdentityTokens(conflicts)
 }
 
 function attributeMatches(parsed: ParsedUserItemQuery, candidate: PriceCandidate) {
@@ -141,6 +239,24 @@ function labelFor(score: number): ScoredCandidate['confidence_label'] {
   if (score >= 0.85) return 'Matched'
   if (score >= 0.65) return 'Needs review'
   return 'Not reliable enough'
+}
+
+function looksLikeNonPriceSpec(candidate: PriceCandidate) {
+  const identity = normalizeSearchText([
+    candidate.table_title,
+    candidate.row_headers.join(' '),
+    candidate.column_headers.join(' '),
+    candidate.parent_headers.join(' '),
+    candidate.description_text,
+    candidate.product_text,
+    candidate.raw_cell_value
+  ].filter(Boolean).join(' '))
+  if (!identity) return false
+  const hasSpecSignal = NON_PRICE_SPEC_TERMS.some(term => tokenAwareMatch(identity, term))
+  if (!hasSpecSignal) return false
+
+  const hasPriceSignal = PRICE_SIGNAL_TERMS.some(term => tokenAwareMatch(identity, term))
+  return !hasPriceSignal
 }
 
 export function scoreCandidate(params: {
@@ -353,6 +469,14 @@ export function scoreCandidate(params: {
     score = Math.min(score, 0.64)
     missing_fields.push('terms:armoured')
   }
+  if (
+    parsed.product_terms.some(term => /^(?:unarmoured|unarmored)$/.test(term))
+    && tokenAwareMatch(candidateIdentityText, 'armoured')
+    && !tokenAwareMatch(candidateIdentityText, 'unarmoured')
+  ) {
+    score = Math.min(score, 0.64)
+    conflicting_fields.push('terms:armoured')
+  }
   if (parsed.product_terms.includes('copper') && tokenAwareMatch(candidateIdentityText, 'aluminium') && !tokenAwareMatch(candidateIdentityText, 'copper')) {
     score = Math.min(score, 0.64)
     conflicting_fields.push('material:aluminium')
@@ -364,6 +488,23 @@ export function scoreCandidate(params: {
   if (!parsed.product_terms.some(term => term === 'speaker') && tokenAwareMatch(candidateIdentityText, 'speaker')) {
     score -= 0.6
     conflicting_fields.push('product:speaker')
+  }
+  if (
+    parsed.product_terms.includes('pipe')
+    && !parsed.product_terms.some(term => PIPE_FITTING_TERMS.includes(term))
+    && PIPE_FITTING_TERMS.some(term => tokenAwareMatch(candidateIdentityText, term))
+  ) {
+    score = Math.min(score - 0.16, 0.72)
+    conflicting_fields.push('product:pipe_fitting')
+  }
+  const familyConflicts = productFamilyConflicts(parsed, candidateIdentityText, searchable)
+  if (familyConflicts.length) {
+    score = Math.min(score - 0.35, 0.34)
+    conflicting_fields.push(...familyConflicts)
+  }
+  if (looksLikeNonPriceSpec(candidate)) {
+    score = Math.min(score, 0.49)
+    conflicting_fields.push('non_price_spec_value')
   }
   score -= params.duplicatePenalty ?? 0
   score = Math.max(0, Math.min(1, Number(score.toFixed(4))))
@@ -420,7 +561,7 @@ export function scoreCandidates(params: {
     duplicateGroups.set(key, (duplicateGroups.get(key) ?? 0) + 1)
   }
 
-  return params.candidates
+  const scored = params.candidates
     .map(candidate => {
       const key = normalizeSearchText([
         candidate.product_text,
@@ -443,4 +584,35 @@ export function scoreCandidates(params: {
       || String(b.candidate.source_uploaded_at ?? '').localeCompare(String(a.candidate.source_uploaded_at ?? ''))
       || String(a.candidate.doc_price_item_id ?? a.candidate.doc_item_id).localeCompare(String(b.candidate.doc_price_item_id ?? b.candidate.doc_item_id))
     )
+  return applyAmbiguityCaps(scored)
+}
+
+function applyAmbiguityCaps(scored: ScoredCandidate[]) {
+  if (scored.length < 2) return scored
+  const [best, ...rest] = scored
+  if (!best || best.score < 0.85) return scored
+
+  const nearAlternatives = rest.filter(item =>
+    item.score >= 0.85
+    && best.score - item.score <= 0.08
+    && normalizeSearchText(item.candidate.description_text || item.candidate.product_text)
+      !== normalizeSearchText(best.candidate.description_text || best.candidate.product_text)
+  )
+  if (!nearAlternatives.length) return scored
+
+  return scored.map((item, index) => {
+    if (index > nearAlternatives.length) return item
+    const cappedScore = Math.min(item.score, 0.84)
+    return {
+      ...item,
+      score: cappedScore,
+      confidence_label: labelFor(cappedScore),
+      needs_review: true,
+      conflicting_fields: uniqueIdentityTokens([...item.conflicting_fields, 'ambiguous:near_tie'])
+    }
+  }).sort((a, b) =>
+    b.score - a.score
+    || candidateSpecificityLength(a.candidate) - candidateSpecificityLength(b.candidate)
+    || String(a.candidate.doc_price_item_id ?? a.candidate.doc_item_id).localeCompare(String(b.candidate.doc_price_item_id ?? b.candidate.doc_item_id))
+  )
 }

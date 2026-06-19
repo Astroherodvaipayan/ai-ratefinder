@@ -5,6 +5,10 @@ import { parseUserItemQuery, splitItemQueries } from './parseUserItemQuery'
 import { explainMatch } from './explainMatch'
 import { scoreCandidates, type ScoredCandidate } from './scoreCandidates'
 import { inferPriceBasis, type PriceBasisSummary } from './priceBasis'
+import { normalizeSearchText, uniqueText } from './text'
+
+const REVIEW_THRESHOLD = 0.65
+const REVIEW_PREVIEW_THRESHOLD = 0.5
 
 export interface SearchItemsResult {
   answer_text: string
@@ -38,8 +42,18 @@ export interface SearchItemsResult {
     reason: string
     did_you_mean?: string | null
     closest_candidates: PriceCandidateSummary[]
+    catalog_matches?: CatalogMatchSummary[]
   }>
   explanations: ReturnType<typeof explainMatch>[]
+}
+
+export interface CatalogMatchSummary {
+  description: string
+  source_page: number | null
+  source_document: string
+  vendor: string | null
+  table_title: string | null
+  matched_text: string
 }
 
 export interface PriceCandidateSummary {
@@ -135,7 +149,12 @@ function readableMatchExplanation(scored: ScoredCandidate) {
 }
 
 function closest(scored: ScoredCandidate[]): PriceCandidateSummary[] {
-  return scored.slice(0, 5).map(item => ({
+  const meaningful = scored.filter(item =>
+    item.score >= 0.35
+    && !item.conflicting_fields.some(field => field.startsWith('product_family:'))
+    && !item.conflicting_fields.includes('non_price_spec_value')
+  )
+  return meaningful.slice(0, 5).map(item => ({
     doc_price_item_id: item.candidate.doc_price_item_id,
     doc_item_id: item.candidate.doc_item_id,
     description: item.candidate.description_text || item.candidate.product_text || item.candidate.searchable_text,
@@ -226,13 +245,19 @@ function requestedQuantityFor(parsed: { requested_quantities?: RequestedQuantity
   return parsed.requested_quantities?.[0] ?? null
 }
 
+function formatPriceValue(price: number) {
+  if (!Number.isFinite(price)) return String(price)
+  const rounded = Math.round(price * 100) / 100
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded)
+}
+
 function pricePhrase(item: Pick<PriceCandidateSummary, 'price' | 'currency' | 'price_basis' | 'variant_label'>) {
   const variant = item.variant_label ? `${item.variant_label}: ` : ''
   const basis = item.price_basis?.source_basis_label ? ` / ${item.price_basis.source_basis_label}` : ''
   const effective = item.price_basis?.effective_unit && item.price_basis.effective_unit_price !== item.price
-    ? `, effective ${item.price_basis.effective_unit_price} ${item.currency}/${item.price_basis.effective_unit}`
+    ? `, effective ${item.currency} ${formatPriceValue(item.price_basis.effective_unit_price)}/${item.price_basis.effective_unit}`
     : ''
-  return `${variant}${item.price} ${item.currency}${basis}${effective}`
+  return `${variant}${item.currency} ${formatPriceValue(item.price)}${basis}${effective}`
 }
 
 function wireVariantGuidance(query: string) {
@@ -244,42 +269,200 @@ function wireVariantGuidance(query: string) {
   return 'FR and FRLS/FRLSH are different wire variants. FR is flame-retardant. FRLS/FRLSH is flame-retardant with low-smoke/halogen wording in the price list. For pricing, choose the variant plus size and quantity, for example "2.5mm FR wire 6 bdl" or "2.5mm FRLS wire 6 bdl"; if you omit the variant, the app will show FR, FRLSH, and HFFR alternatives for review.'
 }
 
+function plural(value: number, singular: string, pluralValue = `${singular}s`) {
+  return value === 1 ? singular : pluralValue
+}
+
+function needVerb(value: number) {
+  return value === 1 ? 'needs' : 'need'
+}
+
+function quotedSummary(value: string | null | undefined, fallback: string, maxLength = 96) {
+  const summary = (value || fallback || '').replace(/\s+/g, ' ').trim()
+  if (!summary) return null
+  const clipped = summary.length > maxLength ? `${summary.slice(0, maxLength - 3).trim()}...` : summary
+  return `"${clipped}"`
+}
+
+function reviewLine(item: SearchItemsResult['priced_items'][number]) {
+  const suggestion = quotedSummary(item.suggested_query, item.description)
+  const source = suggestion ? `possible match ${suggestion}` : 'possible match'
+  const action = item.confidence >= REVIEW_THRESHOLD
+    ? 'Please check it before adding.'
+    : 'Please open the source or make the item name more specific.'
+  return `- ${item.query}: ${source} at ${pricePhrase(item)}. ${action}`
+}
+
+function unresolvedLine(item: SearchItemsResult['unresolved_items'][number]) {
+  if (item.catalog_matches?.length) {
+    const suggestions = item.catalog_matches
+      .slice(0, 3)
+      .map(match => {
+        const source = [match.vendor, match.source_document, match.source_page ? `p.${match.source_page}` : null]
+          .filter(Boolean)
+          .join(' · ')
+        return `"${match.description}"${source ? ` (${source})` : ''}`
+      })
+    return `- ${item.query}: I found matching catalogue text, but not a clear price next to it: ${suggestions.join('; ')}.`
+  }
+
+  const suggestions = item.closest_candidates
+    .slice(0, 2)
+    .map(candidate => {
+      const label = quotedSummary(candidate.suggested_query, candidate.description)
+      return label ? `${label} at ${pricePhrase(candidate)}` : null
+    })
+    .filter((value): value is string => Boolean(value))
+
+  if (!suggestions.length) {
+    return `- ${item.query}: I could not find a clear price in the selected document. Try adding brand, model, or the exact catalogue wording.`
+  }
+
+  const remaining = Math.max(0, item.closest_candidates.length - suggestions.length)
+  const suffix = remaining ? `; plus ${remaining} more possible ${plural(remaining, 'match', 'matches')}` : ''
+  return `- ${item.query}: I found possible prices, but need you to choose the right one: ${suggestions.join('; ')}${suffix}.`
+}
+
 function answerText(result: Pick<SearchItemsResult, 'priced_items' | 'unresolved_items'> & { guidance_messages?: string[] }) {
   const matched = result.priced_items.filter(item => !item.needs_review).length
   const review = result.priced_items.filter(item => item.needs_review).length
   const unresolved = result.unresolved_items.length
   const parts: string[] = []
   if (result.guidance_messages?.length) parts.push(...result.guidance_messages)
-  if (matched) parts.push(`Matched ${matched} source-backed item${matched === 1 ? '' : 's'}.`)
+  if (matched) {
+    parts.push(`Found ${matched} ${plural(matched, 'item')} ready to add to the quote.`)
+  }
   if (review) {
-    const reviewExamples = result.priced_items
+    const reviewItems = result.priced_items
       .filter(item => item.needs_review)
       .slice(0, 3)
-      .map(item => item.suggested_query
-        ? `${item.query} -> did you mean ${item.suggested_query} at ${pricePhrase(item)}`
-        : item.query)
-      .join('; ')
-    parts.push(`${review} item${review === 1 ? ' needs' : 's need'} review before quotation${reviewExamples ? `. Did you mean: ${reviewExamples}` : ''}.`)
+    const reviewLines = reviewItems.map(reviewLine)
+    const hidden = review - reviewLines.length
+    parts.push([
+      `${review} possible ${plural(review, 'match', 'matches')} ${needVerb(review)} a quick check before adding:`,
+      ...reviewLines,
+      hidden ? `- ${hidden} more ${plural(hidden, 'item')} shown in the cards below.` : null
+    ].filter(Boolean).join('\n'))
   }
   if (unresolved) {
-    const examples = result.unresolved_items
-      .slice(0, 5)
-      .map(item => {
-        const suggestions = item.closest_candidates
-          .slice(0, 3)
-          .flatMap(candidate => candidate.suggested_query
-            ? [`${candidate.suggested_query} at ${pricePhrase(candidate)}`]
-            : [])
-        return suggestions.length
-          ? `${item.query} -> did you mean ${suggestions.join(' OR ')}`
-          : item.query
-      })
-      .join('; ')
-    parts.push(
-      `Needs clarification for ${unresolved} line${unresolved === 1 ? '' : 's'}; no source-backed price was safe enough to quote automatically${examples ? `. Did you mean: ${examples}${unresolved > 5 ? '; ...' : ''}` : ''}.`
-    )
+    const unresolvedItems = result.unresolved_items.slice(0, 3)
+    const unresolvedLines = unresolvedItems.map(unresolvedLine)
+    const hidden = unresolved - unresolvedLines.length
+    parts.push([
+      `I need help with ${unresolved} ${plural(unresolved, 'item')} before adding them to the quote:`,
+      ...unresolvedLines,
+      hidden ? `- ${hidden} more ${plural(hidden, 'item')} need a clearer brand, size, model, or document.` : null
+    ].filter(Boolean).join('\n'))
   }
-  return parts.join(' ') || 'No reliable priced records were found.'
+  if (review || unresolved) {
+    parts.push(matched
+      ? 'I added only the clear matches. The rest are waiting for your review.'
+      : review
+        ? 'I have not added anything to the quote yet. Please review the cards below.'
+        : 'I have not added anything to the quote yet.')
+  }
+  return parts.join('\n\n') || 'I could not find a clear price. Try adding brand, size, model, or the document name.'
+}
+
+function canShowReviewCard(scored: ScoredCandidate | null): scored is ScoredCandidate {
+  if (!scored) return false
+  if (scored.score >= REVIEW_THRESHOLD) return true
+  if (scored.score < REVIEW_PREVIEW_THRESHOLD) return false
+  if (scored.conflicting_fields.includes('non_price_spec_value')) return false
+  if (scored.conflicting_fields.some(field => field.startsWith('product_family:'))) return false
+  return Boolean(scored.candidate.doc_price_item_id || scored.candidate.doc_item_id)
+}
+
+async function catalogMatches(params: {
+  client: SupabaseClient
+  tenantId: string
+  documentId?: string | null
+  vendorId?: string | null
+  parsed: ReturnType<typeof parseUserItemQuery>
+  limit?: number
+}): Promise<CatalogMatchSummary[]> {
+  const productTerms = uniqueText(params.parsed.product_terms
+    .filter(term => term.length >= 2)
+    .filter(term => !/^(?:hl|hills?)$/.test(term))
+    .filter(term => !params.parsed.vendor_terms.includes(term) && !params.parsed.brand_terms.includes(term)))
+  const tokenTerms = uniqueText(params.parsed.normalized_query
+    .split(/\s+/)
+    .filter(term => term.length >= 2)
+    .filter(term => !/^(?:price|rate|show|find|give|need|hl|hills?)$/.test(term)))
+  const terms = uniqueText([
+    ...productTerms,
+    ...tokenTerms,
+    ...params.parsed.attribute_hints.map(hint => hint.value),
+    ...params.parsed.attribute_hints.map(hint => hint.unit)
+  ].filter((term): term is string => Boolean(term && term.length >= 2)))
+    .slice(0, 10)
+  if (!terms.length) return []
+
+  let query = params.client
+    .from('doc_table_cells')
+    .select('id, document_id, vendor_id, source_page, row_headers, column_headers, parent_headers, raw_cell_value, normalized_value, is_header, doc_tables:source_table_id(table_title, section_breadcrumb), documents:document_id(filename, vendor:vendor_id(name))')
+    .eq('tenant_id', params.tenantId)
+    .eq('is_header', false)
+    .limit(params.documentId ? 5000 : 1000)
+  if (params.documentId) query = query.eq('document_id', params.documentId)
+  if (params.vendorId) query = query.eq('vendor_id', params.vendorId)
+
+  const { data, error } = await query
+  if (error) return []
+
+  const normalizedTerms = terms.map(normalizeSearchText).filter(Boolean)
+  const normalizedProductTerms = productTerms.map(normalizeSearchText).filter(Boolean)
+  const compactQuery = normalizeSearchText(params.parsed.normalized_query).replace(/\s+/g, '')
+  const scored = (data ?? []).map((row: any) => {
+    const table = Array.isArray(row.doc_tables) ? row.doc_tables[0] : row.doc_tables
+    const document = Array.isArray(row.documents) ? row.documents[0] : row.documents
+    const text = uniqueText([
+      row.raw_cell_value,
+      ...(row.row_headers ?? []),
+      ...(row.column_headers ?? []),
+      ...(row.parent_headers ?? []),
+      table?.table_title,
+      ...(table?.section_breadcrumb ?? []),
+      document?.filename,
+      document?.vendor?.name
+    ].filter(Boolean)).join(' ')
+    const normalizedText = normalizeSearchText(text)
+    const compactText = normalizedText.replace(/\s+/g, '')
+    const productHit = normalizedProductTerms.length
+      ? normalizedProductTerms.some(term => normalizedText.includes(term) || compactText.includes(term.replace(/\s+/g, '')))
+      : true
+    const score = normalizedTerms.reduce((sum, term) => {
+      const hit = normalizedText.includes(term) || compactText.includes(term.replace(/\s+/g, ''))
+      if (!hit) return sum
+      return sum + (normalizedProductTerms.includes(term) ? 2 : 1)
+    }, compactQuery && compactText.includes(compactQuery) ? 4 : 0)
+    return { row, table, document, text, score, productHit }
+  })
+    .filter(item => item.productHit && item.score >= 2)
+    .sort((a, b) => b.score - a.score || a.text.length - b.text.length)
+
+  const seen = new Set<string>()
+  const out: CatalogMatchSummary[] = []
+  for (const item of scored) {
+    const description = uniqueText([
+      ...(item.row.row_headers ?? []),
+      item.row.raw_cell_value,
+      ...(item.row.parent_headers ?? [])
+    ].filter(Boolean)).join(' ')
+    const key = normalizeSearchText(description)
+    if (!description || seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      description,
+      source_page: item.row.source_page ?? null,
+      source_document: item.document?.filename ?? '',
+      vendor: item.document?.vendor?.name ?? null,
+      table_title: item.table?.table_title ?? null,
+      matched_text: item.text
+    })
+    if (out.length >= (params.limit ?? 5)) break
+  }
+  return out
 }
 
 export async function searchItems(params: {
@@ -322,15 +505,23 @@ export async function searchItems(params: {
     const best = scored[0] ?? null
     const explanation = explainMatch({
       query,
-      scored: best && best.score >= 0.65 ? best : null,
-      alternatives: scored.slice(best && best.score >= 0.65 ? 1 : 0, 6)
+      scored: best && best.score >= REVIEW_THRESHOLD ? best : null,
+      alternatives: scored.slice(best && best.score >= REVIEW_THRESHOLD ? 1 : 0, 6)
     })
 
-    return { query, parsed: normalized.query, scored, best, explanation, guidance: null }
+    const catalog = scored.length ? [] : await catalogMatches({
+      client: params.client,
+      tenantId: params.tenantId,
+      parsed: normalized.query,
+      vendorId: params.vendorId,
+      documentId: params.documentId
+    })
+
+    return { query, parsed: normalized.query, scored, best, explanation, guidance: null, catalog }
   })
 
   const priced_items = perQuery.flatMap(item => {
-    if (!item.best || item.best.score < 0.65) return []
+    if (!canShowReviewCard(item.best)) return []
     return [pricedItemFromScore(
       item.query,
       item.best,
@@ -341,14 +532,18 @@ export async function searchItems(params: {
 
   const unresolved_items = perQuery.flatMap(item => {
     if (item.guidance) return []
-    if (item.best && item.best.score >= 0.65) return []
+    if (canShowReviewCard(item.best)) return []
+    const closestCandidates = closest(item.scored)
     return [{
       query: item.query,
       reason: item.scored.length
         ? 'Closest records did not meet the deterministic confidence threshold.'
-        : 'No indexed price records matched this query.',
-      did_you_mean: item.scored[0] ? suggestedQuery(item.scored[0]) : null,
-      closest_candidates: closest(item.scored)
+        : item.catalog?.length
+          ? 'Catalogue records matched, but no deterministic price/rate cell exists for this query.'
+          : 'No indexed price records matched this query.',
+      did_you_mean: closestCandidates[0]?.suggested_query ?? null,
+      closest_candidates: closestCandidates,
+      catalog_matches: item.catalog ?? []
     }]
   })
 

@@ -310,6 +310,10 @@ async function addToQuotation(item: CardItem, quotationId: string | null) {
     error.value = 'This price candidate has no source record and cannot be added.'
     return
   }
+  if (item.confidence < 0.65) {
+    error.value = 'This candidate is below the quotation threshold. Open the source or choose a stronger alternative before adding it.'
+    return
+  }
   if (!isQuoteReady(item)) {
     const confirmed = window.confirm(
       'This match needs review before it goes into the quotation. Add it anyway?'
@@ -352,7 +356,7 @@ async function openProforma() {
 
 function sourceHref(item: Pick<CardItem, 'doc_price_item_id' | 'doc_item_id'>) {
   const sourceId = item.doc_price_item_id || item.doc_item_id
-  return sourceId ? `/api/doc_items/${sourceId}/file?redirect=1` : null
+  return sourceId ? `/source/${sourceId}` : null
 }
 
 function formatMoney(n: number | null, currency = 'INR') {
@@ -603,6 +607,7 @@ async function onDocumentsUploaded() {
 
               <div class="mt-4 flex flex-wrap items-center justify-between gap-2">
                 <UDropdownMenu
+                  v-if="it.confidence >= 0.65"
                   :items="[[
                     ...quotations.map(q => ({
                       label: q.title,
@@ -617,14 +622,24 @@ async function onDocumentsUploaded() {
                     {{ it.needs_review ? 'Confirm & add' : 'Add' }}
                   </UButton>
                 </UDropdownMenu>
-                <a
+                <UButton
+                  v-else
+                  size="xs"
+                  variant="soft"
+                  color="neutral"
+                  icon="i-lucide-lock"
+                  disabled
+                >
+                  Source only
+                </UButton>
+                <NuxtLink
                   v-if="sourceHref(it)"
-                  :href="sourceHref(it)!"
+                  :to="sourceHref(it)!"
                   class="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted transition hover:bg-muted hover:text-highlighted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-highlighted"
                 >
                   <UIcon name="i-lucide-external-link" />
                   Source
-                </a>
+                </NuxtLink>
               </div>
             </article>
           </div>

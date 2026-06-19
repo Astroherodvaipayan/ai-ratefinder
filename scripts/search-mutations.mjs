@@ -68,4 +68,25 @@ const pasted = ['6SqmmX2Core', '1.5Sqmm FR Wire 300Mtr'].join('\n')
 const parsedPasted = parseUserItemQuery(pasted)
 assert(parsedPasted.attribute_hints.length >= 2, 'multi-item pasted query should expose deterministic attributes')
 
-console.log(`eval:mutations passed ${mutations.length + 1} mutation cases`)
+const singleCoreMutations = [
+  '4Sqmm*SC Red wire',
+  '4 sqmm single core red wire',
+  '2 bdl 4SqmmXSC red wire'
+]
+
+for (const query of singleCoreMutations) {
+  const parsed = parseUserItemQuery(query)
+  assert(
+    parsed.attribute_hints.some(hint => hint.name === 'cores' && hint.value === '1'),
+    `${query}: expected single-core attribute`
+  )
+}
+
+const salesQuantityParsed = parseUserItemQuery('2 boxes 6Amp Switch')
+assert.deepEqual(
+  salesQuantityParsed.requested_quantities[0],
+  { value: 2, unit: 'box', raw: '2 boxes' },
+  'boxes should be treated as ordered quantity'
+)
+
+console.log(`eval:mutations passed ${mutations.length + 5} mutation cases`)

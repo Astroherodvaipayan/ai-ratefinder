@@ -19,6 +19,42 @@ interface UploadTarget {
   storage_path: string
 }
 
+export interface ApiBudgetUsage {
+  month_start: string
+  budget_inr: number
+  top_up_amount_inr?: number
+  top_up_total_inr?: number
+  credit_limit_inr?: number
+  total_spend_inr: number
+  remaining_inr: number
+  balance_inr?: number
+  total_pages: number
+  total_requests: number
+  is_over_budget: boolean
+  requires_payment?: boolean
+  has_payment_ref: boolean
+}
+
+export class ApiBudgetExceededError extends Error {
+  billing: ApiBudgetUsage | null
+
+  constructor(message: string, billing: ApiBudgetUsage | null) {
+    super(message)
+    this.name = 'ApiBudgetExceededError'
+    this.billing = billing
+  }
+}
+
+function asBudgetExceededError(err: any) {
+  const status = err?.statusCode ?? err?.response?.status
+  if (status !== 402) return null
+  const billing = err?.data?.data?.billing ?? err?.data?.billing ?? null
+  return new ApiBudgetExceededError(
+    err?.statusMessage || err?.message || 'Monthly API budget exceeded.',
+    billing
+  )
+}
+
 function encodeStoragePath(path: string) {
   return path.split('/').map(encodeURIComponent).join('/')
 }
@@ -202,14 +238,19 @@ export async function uploadDocumentDirect(file: File, options: DirectDocumentUp
   }
 
   const { url, key } = getSupabaseConfig(supabase)
-  const target = await $fetch<UploadTarget>('/api/documents/upload-target', {
-    method: 'POST',
-    body: {
-      filename: file.name,
-      size: file.size,
-      mime: file.type || null
-    }
-  })
+  let target: UploadTarget
+  try {
+    target = await $fetch<UploadTarget>('/api/documents/upload-target', {
+      method: 'POST',
+      body: {
+        filename: file.name,
+        size: file.size,
+        mime: file.type || null
+      }
+    })
+  } catch (err: any) {
+    throw asBudgetExceededError(err) ?? err
+  }
 
   await uploadFileToStorage({
     url,

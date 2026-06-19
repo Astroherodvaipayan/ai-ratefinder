@@ -76,6 +76,54 @@ assert(
   'legacy recall must also search compact core forms like "2core"'
 )
 
+const switchQuantityParsed = parseUserItemQuery('12 nos 6Amp Switch')
+assert.deepEqual(
+  switchQuantityParsed.requested_quantities[0],
+  { value: 12, unit: 'piece', raw: '12 nos' },
+  'nos should be treated as ordered quantity'
+)
+assert(
+  !switchQuantityParsed.attribute_hints.some(hint => hint.name === 'piece'),
+  'sales units such as nos should not become product attributes'
+)
+
+const packetQuantityParsed = parseUserItemQuery('3 PKT blank plate')
+assert.deepEqual(
+  packetQuantityParsed.requested_quantities[0],
+  { value: 3, unit: 'packet', raw: '3 PKT' },
+  'PKT should normalize to packet as an ordered quantity'
+)
+
+const workbookCableParsed = parseUserItemQuery('25Sqmm*3.5Core XLPE Cu Armoured Cabel')
+assert(
+  workbookCableParsed.attribute_hints.some(hint => hint.name === 'size' && hint.value === '25' && hint.unit === 'sqmm'),
+  'workbook cable query should expose size'
+)
+assert(
+  workbookCableParsed.attribute_hints.some(hint => hint.name === 'cores' && hint.value === '3.5'),
+  'workbook cable query should expose decimal core count'
+)
+assert(
+  workbookCableParsed.product_terms.includes('cable'),
+  'Cabel typo should normalize to cable'
+)
+assert(
+  workbookCableParsed.vendor_terms.includes('polycab'),
+  'known unique workbook cable should infer Polycab as a vendor hint'
+)
+
+const singleCoreParsed = parseUserItemQuery('4Sqmm*SC Red wire')
+assert(
+  singleCoreParsed.attribute_hints.some(hint => hint.name === 'cores' && hint.value === '1'),
+  'SC should parse as single core in cable/wire context'
+)
+
+const hillsParsed = parseUserItemQuery('wardrobe sensor')
+assert(
+  hillsParsed.vendor_terms.includes('hills'),
+  'workbook typo Scensior should still let wardrobe sensor infer Hills'
+)
+
 const legacyOrientStyleCandidate = {
   ...candidate,
   doc_price_item_id: null,
@@ -116,4 +164,38 @@ assert(
   `vague numeric-only query should not auto-match, got ${vagueScored.score}`
 )
 
-console.log(`eval:search passed ${cases.length + 4} deterministic cases`)
+const workbookCableCandidate = {
+  ...candidate,
+  doc_price_item_id: 'fixture-price-polycab-25sqmm-3p5core',
+  doc_item_id: 'fixture-legacy-polycab-25sqmm-3p5core',
+  vendor: 'Polycab',
+  row_headers: ['25 sqmm'],
+  column_headers: ['3.5 core'],
+  parent_headers: ['Copper conductor'],
+  table_title: 'XLPE Copper Armoured Cable',
+  unit: 'meter',
+  product_text: '25 sqmm 3.5 core XLPE Copper Armoured Cable',
+  sku_text: '25 sqmm',
+  description_text: '25 sqmm 3.5 core XLPE Copper Armoured Cable',
+  attributes_json: [
+    { name: 'size', value: '25', unit: 'sqmm' },
+    { name: 'cores', value: '3.5' }
+  ],
+  searchable_text: 'Vendor: Polycab. Section: XLPE Copper Armoured Cable. Row: 25 sqmm. Column: 3.5 core. Rate: 100 INR per meter.',
+  normalized_search_text: 'polycab xlpe copper armoured cable 25 sqmm 3.5 core 100 inr meter',
+  normalized_price: 100
+}
+const [workbookCableScored] = scoreCandidates({ parsed: workbookCableParsed, candidates: [workbookCableCandidate] })
+assert(
+  workbookCableScored.score >= 0.85,
+  `workbook 3.5 core cable should match confidently, got ${workbookCableScored.score}`
+)
+
+const unarmouredParsed = parseUserItemQuery('6 sqmm 2 core copper unarmoured cable')
+const [armouredForUnarmoured] = scoreCandidates({ parsed: unarmouredParsed, candidates: [candidate] })
+assert(
+  armouredForUnarmoured.score < 0.65,
+  `unarmoured query should not auto-accept armoured candidate, got ${armouredForUnarmoured.score}`
+)
+
+console.log(`eval:search passed ${cases.length + 14} deterministic cases`)

@@ -1,7 +1,8 @@
 import { SarvamAIClient } from 'sarvamai'
 import { load } from 'cheerio'
 import JSZip from 'jszip'
-import { parsePriceRowsFromGrid } from './internalPriceParser'
+import { PDFDocument } from 'pdf-lib'
+import { parsePriceRowsFromGrid, parsePriceRowsFromHtmlTables } from './internalPriceParser'
 import type { ExtractedPriceRow } from './priceExtraction'
 import type { SarvamLanguage } from './parserSettings'
 
@@ -12,6 +13,8 @@ export interface SarvamPriceExtractionResult {
   pageCount: number | null
   warnings: string[]
 }
+
+const SARVAM_MAX_PDF_PAGES = Number(process.env.SARVAM_MAX_PDF_PAGES || 10)
 
 function apiKey() {
   const key = useRuntimeConfig().sarvamApiKey || process.env.SARVAM_API_KEY
@@ -26,7 +29,7 @@ function apiKey() {
 
 function sanitizeHtml(html: string) {
   const $ = load(html)
-  $('script, style, iframe, object, embed, link, meta').remove()
+  $('script, style, iframe, object, embed, link, meta, img, picture, source, svg, canvas, video').remove()
   $('*').each((_, el) => {
     const attribs = $(el).attr() ?? {}
     for (const [name, value] of Object.entries(attribs)) {
@@ -79,12 +82,15 @@ function htmlToIndexableMarkdown(html: string) {
   return chunks.join('\n\n')
 }
 
-function rowsFromHtml(html: string): ExtractedPriceRow[] {
+function rowsFromHtml(html: string, fallbackSourcePage: number | null = null): ExtractedPriceRow[] {
   const $ = load(html)
   const seen = new Set<string>()
-  return $('table').toArray().flatMap((table) => {
+  const htmlRows = parsePriceRowsFromHtmlTables(html, fallbackSourcePage)
+  const gridRows = $('table').toArray().flatMap((table) => {
     const grid = tableToGrid($.html(table))
-    return parsePriceRowsFromGrid(grid).flatMap((row) => {
+    return parsePriceRowsFromGrid(grid, fallbackSourcePage)
+  })
+  return [...htmlRows, ...gridRows].flatMap((row) => {
       const parsed = {
         raw_name: row.raw_name,
         sku: row.sku,
@@ -103,7 +109,6 @@ function rowsFromHtml(html: string): ExtractedPriceRow[] {
       if (seen.has(key)) return []
       seen.add(key)
       return [parsed]
-    })
   })
 }
 
@@ -174,14 +179,39 @@ async function downloadZip(job: Awaited<ReturnType<SarvamAIClient['documentIntel
   return Buffer.from(await res.arrayBuffer())
 }
 
-export async function runSarvamPriceExtraction(params: {
+async function splitPdfIntoSarvamChunks(fileData: Buffer) {
+  const source = await PDFDocument.load(fileData, { ignoreEncryption: true })
+  const pageCount = source.getPageCount()
+  if (pageCount <= SARVAM_MAX_PDF_PAGES) return [{ fileData, startPage: 1, pageCount }]
+
+  const chunks: Array<{ fileData: Buffer; startPage: number; pageCount: number }> = []
+  for (let start = 0; start < pageCount; start += SARVAM_MAX_PDF_PAGES) {
+    const end = Math.min(start + SARVAM_MAX_PDF_PAGES, pageCount)
+    const target = await PDFDocument.create()
+    const copied = await target.copyPages(source, Array.from({ length: end - start }, (_, index) => start + index))
+    for (const page of copied) target.addPage(page)
+    chunks.push({
+      fileData: Buffer.from(await target.save()),
+      startPage: start + 1,
+      pageCount: end - start
+    })
+  }
+  return chunks
+}
+
+function isPdf(filename: string, mime?: string | null) {
+  return /\.pdf$/i.test(filename) || String(mime ?? '').toLowerCase() === 'application/pdf'
+}
+
+async function runSarvamJob(params: {
+  client: SarvamAIClient
   fileData: Buffer
   filename: string
   mime?: string | null
   language: SarvamLanguage
-}): Promise<SarvamPriceExtractionResult> {
-  const client = new SarvamAIClient({ apiSubscriptionKey: apiKey() })
-  const job = await client.documentIntelligence.createJob({
+  pageOffset?: number
+}) {
+  const job = await params.client.documentIntelligence.createJob({
     language: params.language,
     outputFormat: 'html'
   })
@@ -203,15 +233,50 @@ export async function runSarvamPriceExtraction(params: {
   const metrics = job.getPageMetrics()
   const zipBuffer = await downloadZip(job)
   const extracted = await readSarvamZip(zipBuffer)
-  const rows = rowsFromHtml(extracted.html)
-  const warnings: string[] = []
-  if (!rows.length) warnings.push('Sarvam completed, but no product/price rows were detected in the HTML tables.')
-
+  const pageOffset = params.pageOffset ?? 0
   return {
     requestId: job.jobId,
-    rows,
+    rows: rowsFromHtml(extracted.html, 1).map(row => ({
+      ...row,
+      source_page: row.source_page ? row.source_page + pageOffset : row.source_page
+    })),
     markdown: extracted.html || extracted.indexableMarkdown,
-    pageCount: metrics.totalPages || extracted.pageCount,
+    pageCount: metrics.totalPages || extracted.pageCount
+  }
+}
+
+export async function runSarvamPriceExtraction(params: {
+  fileData: Buffer
+  filename: string
+  mime?: string | null
+  language: SarvamLanguage
+}): Promise<SarvamPriceExtractionResult> {
+  const client = new SarvamAIClient({ apiSubscriptionKey: apiKey() })
+  const chunks = isPdf(params.filename, params.mime)
+    ? await splitPdfIntoSarvamChunks(params.fileData)
+    : [{ fileData: params.fileData, startPage: 1, pageCount: null }]
+  const extractedChunks = []
+  for (const [index, chunk] of chunks.entries()) {
+    extractedChunks.push(await runSarvamJob({
+      client,
+      fileData: chunk.fileData,
+      filename: chunks.length > 1 ? params.filename.replace(/\.pdf$/i, `.part-${index + 1}.pdf`) : params.filename,
+      mime: params.mime,
+      language: params.language,
+      pageOffset: chunk.startPage - 1
+    }))
+  }
+
+  const rows = extractedChunks.flatMap(chunk => chunk.rows)
+  const warnings: string[] = []
+  if (!rows.length) warnings.push('Sarvam completed, but no product/price rows were detected in the HTML tables.')
+  if (chunks.length > 1) warnings.push(`Sarvam processed the PDF in ${chunks.length} chunks because the provider limit is ${SARVAM_MAX_PDF_PAGES} pages per job.`)
+
+  return {
+    requestId: extractedChunks.map(chunk => chunk.requestId).join(','),
+    rows,
+    markdown: extractedChunks.map(chunk => chunk.markdown).filter(Boolean).join('\n'),
+    pageCount: chunks.reduce((total, chunk) => total + (chunk.pageCount ?? 0), 0) || extractedChunks.reduce((total, chunk) => total + (chunk.pageCount ?? 0), 0) || null,
     warnings
   }
 }

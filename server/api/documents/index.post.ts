@@ -18,6 +18,7 @@ import { runChandraPriceExtraction, type ExtractedPriceRow } from '../../utils/p
 import { runSarvamPriceExtraction } from '../../utils/sarvam'
 import { adminClient } from '../../utils/supabase'
 import { ensureUploadBucketLimit } from '../../utils/uploadBucket'
+import { recordDocumentApiCost } from '../../utils/billing'
 import {
   MAX_DOCUMENT_UPLOAD_BYTES,
   documentUploadSizeError
@@ -38,6 +39,7 @@ type StoredUploadBody = {
 }
 
 const DOC_ITEM_INSERT_CHUNK_SIZE = 1000
+const MAX_STORED_PARSED_MARKDOWN_CHARS = Number(process.env.MAX_STORED_PARSED_MARKDOWN_CHARS || 200_000)
 
 const KNOWN_VENDOR_NAMES = [
   'ABB',
@@ -82,6 +84,15 @@ function inferVendorName(filename: string, markdown: string, existingNames: stri
     .sort((a, b) => a.index - b.index || b.name.length - a.name.length)
 
   return matched[0]?.name ?? null
+}
+
+function storedParsedMarkdown(markdown: string) {
+  if (markdown.length <= MAX_STORED_PARSED_MARKDOWN_CHARS) return markdown
+  return [
+    markdown.slice(0, MAX_STORED_PARSED_MARKDOWN_CHARS),
+    '',
+    `[AI Ratefinder truncated stored parser preview at ${MAX_STORED_PARSED_MARKDOWN_CHARS} characters; structured price rows remain fully indexed.]`
+  ].join('\n')
 }
 
 async function ensureVendorForMarkdown(params: {
@@ -528,7 +539,7 @@ export async function processUploadedDocument(params: {
     await client.from('documents').update({
       status: 'extracting',
       chandra_request_id: requestId,
-      parsed_markdown: markdown,
+      parsed_markdown: storedParsedMarkdown(markdown),
       page_count: pageCount,
       updated_at: new Date().toISOString()
     }).eq('id', params.doc.id)
@@ -545,6 +556,12 @@ export async function processUploadedDocument(params: {
         insertedDocItems
       })
     }
+
+    await recordDocumentApiCost({
+      client,
+      documentId: params.doc.id,
+      pageCount
+    })
 
     await client.from('documents').update({
       status: 'parsed',

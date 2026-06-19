@@ -60,14 +60,18 @@ function cellText(value: string | null | undefined) {
 
 function numericAttributes(text: string): CanonicalAttribute[] {
   const attributes: CanonicalAttribute[] = []
-  for (const match of normalizeSearchText(text).matchAll(/\b(\d+(?:\.\d+)?)\s*(sqmm|mm|meter|kg|core|piece|box|coil|pair)\b/g)) {
+  const normalized = normalizeSearchText(text)
+  for (const match of normalized.matchAll(/\b(\d+(?:\.\d+)?)\s*(sqmm|mm|meter|kg|core|piece|box|bag|case|coil|roll|pair|packet|set|sqft|sqm|tin|ton|unit|dozen)\b/g)) {
     const [, value, unit] = match
     if (!value || !unit) continue
     const name = unit === 'core' ? 'cores' : unit === 'meter' ? 'length' : unit === 'sqmm' ? 'size' : unit
     attributes.push({ name, value, unit: unit === 'core' ? undefined : unit })
   }
-  for (const match of normalizeSearchText(text).matchAll(/\b(\d+)\s*c\b/g)) {
+  for (const match of normalized.matchAll(/\b(\d+(?:\.\d+)?)\s*c\b/g)) {
     attributes.push({ name: 'cores', value: match[1]! })
+  }
+  if (/\bsqmm\b/.test(normalized) && /\bsc\b/.test(normalized)) {
+    attributes.push({ name: 'cores', value: '1' })
   }
   return attributes
 }
@@ -101,18 +105,35 @@ function unitFor(text: string) {
   const normalized = normalizeSearchText(text)
   if (/\bmeter\b/.test(normalized)) return 'meter'
   if (/\bcoil\b|\broll\b/.test(normalized)) return 'coil'
+  if (/\bbag\b/.test(normalized)) return 'bag'
+  if (/\bcase\b/.test(normalized)) return 'case'
   if (/\bbox\b/.test(normalized)) return 'box'
   if (/\bkg\b/.test(normalized)) return 'kg'
   if (/\bpiece\b/.test(normalized)) return 'piece'
   if (/\bpair\b/.test(normalized)) return 'pair'
+  if (/\bpacket\b/.test(normalized)) return 'packet'
+  if (/\bset\b/.test(normalized)) return 'set'
+  if (/\bsqft\b/.test(normalized)) return 'sqft'
+  if (/\bsqm\b/.test(normalized)) return 'sqm'
+  if (/\btin\b/.test(normalized)) return 'tin'
+  if (/\bton\b/.test(normalized)) return 'ton'
+  if (/\bunit\b/.test(normalized)) return 'unit'
+  if (/\bdozen\b/.test(normalized)) return 'dozen'
   return null
+}
+
+function isSpecHeaderContext(text: string) {
+  return /\b(?:beam\s*angle|viewing\s*angle|lumens?|lumen|watt(?:age)?|watts?|cct|cri|ip|pf|power\s*factor|voltage|volt|hz|led\s*type|ledtype|cut\s*out|cutout|dimension|diameter|height|width|length|body\s*color|body\s*colour|color|colour|finish|material|image|photo)\b/.test(text)
 }
 
 function isPriceLike(value: string, headers: string[]) {
   if (parsePriceNumber(value) === null) return false
   const context = normalizeSearchText([...headers, value].join(' '))
+  if (isSpecHeaderContext(context)) return false
   if (/\b(?:rate|price|mrp|amount|cost|inr|rs|₹)\b/.test(context)) return true
-  return !/\b(?:sqmm|mm|meter|core|kg|piece|pair)\b/.test(normalizeSearchText(value))
+  if (/[₹]|(?:\brs\.?\b|\binr\b)/i.test(value)) return true
+  if (/\b(?:per\s+)?(?:mtrs?|meters?|meter|coil|roll|pair|nos?|pcs?|piece|box|set)\b/.test(context)) return true
+  return false
 }
 
 function buildCellsFromGrid(params: {

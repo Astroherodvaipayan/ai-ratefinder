@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { ParsedUserItemQuery } from './parseUserItemQuery'
 import { normalizeSearchText } from './text'
+import { FULL_KITTING_UNITS } from './fullKittingKnowledge'
 
 export interface AppliedAlias {
   alias_text: string
@@ -16,13 +17,29 @@ export interface AliasNormalizationResult {
   low_confidence_aliases: AppliedAlias[]
 }
 
+const FULL_KITTING_UNIT_ALIASES: AppliedAlias[] = FULL_KITTING_UNITS.flatMap(unit =>
+  unit.aliases
+    .filter(alias => normalizeSearchText(alias) !== normalizeSearchText(unit.canonical))
+    .map(alias => ({
+      alias_text: alias,
+      canonical_text: unit.canonical,
+      confidence: 0.94,
+      source: 'full-kitting-workbook',
+      scope: 'global'
+    }))
+)
+
 const BUILT_IN_ALIASES: AppliedAlias[] = [
   { alias_text: 'sq mm', canonical_text: 'sqmm', confidence: 0.98, source: 'seed', scope: 'global' },
   { alias_text: 'sq.mm', canonical_text: 'sqmm', confidence: 0.98, source: 'seed', scope: 'global' },
   { alias_text: 'mtr', canonical_text: 'meter', confidence: 0.95, source: 'seed', scope: 'global' },
   { alias_text: 'mtrs', canonical_text: 'meter', confidence: 0.95, source: 'seed', scope: 'global' },
   { alias_text: 'pc', canonical_text: 'piece', confidence: 0.9, source: 'seed', scope: 'global' },
-  { alias_text: 'pcs', canonical_text: 'piece', confidence: 0.9, source: 'seed', scope: 'global' }
+  { alias_text: 'pcs', canonical_text: 'piece', confidence: 0.9, source: 'seed', scope: 'global' },
+  { alias_text: 'cabel', canonical_text: 'cable', confidence: 0.92, source: 'full-kitting-workbook', scope: 'global' },
+  { alias_text: 'cabels', canonical_text: 'cable', confidence: 0.92, source: 'full-kitting-workbook', scope: 'global' },
+  { alias_text: 'scensior', canonical_text: 'sensor', confidence: 0.86, source: 'full-kitting-workbook', scope: 'global' },
+  ...FULL_KITTING_UNIT_ALIASES
 ]
 
 async function loadAliases(params: {

@@ -4,7 +4,11 @@ import {
   MAX_DOCUMENT_UPLOAD_LABEL,
   documentUploadSizeError
 } from '~~/shared/documentUpload'
-import { uploadDocumentDirect } from '~/utils/directDocumentUpload'
+import {
+  ApiBudgetExceededError,
+  uploadDocumentDirect,
+  type ApiBudgetUsage
+} from '~/utils/directDocumentUpload'
 
 definePageMeta({ layout: 'default' })
 
@@ -30,6 +34,8 @@ const savingVendorIds = ref<string[]>([])
 const uploadProgress = ref(0)
 const uploadFilename = ref('')
 const uploadPhase = ref<'idle' | 'uploading' | 'queued'>('idle')
+const budgetPaymentOpen = ref(false)
+const budgetUsage = ref<ApiBudgetUsage | null>(null)
 const uploadLabel = computed(() =>
   uploadPhase.value === 'uploading'
     ? `Uploading ${uploadFilename.value || 'document'} directly to storage...`
@@ -131,6 +137,10 @@ async function uploadFiles(files: FileList | File[]) {
       if (uploadPhase.value === 'queued') uploadPhase.value = 'idle'
     }, 1800)
   } catch (err: any) {
+    if (err instanceof ApiBudgetExceededError || err?.billing) {
+      budgetUsage.value = err.billing ?? null
+      budgetPaymentOpen.value = true
+    }
     uploadError.value = err?.statusMessage || err?.message || 'Upload failed'
   } finally {
     uploading.value = false
@@ -388,4 +398,10 @@ onBeforeUnmount(() => {
       </div>
     </div>
   </div>
+
+  <ApiBudgetPaymentModal
+    v-model:open="budgetPaymentOpen"
+    :usage="budgetUsage"
+    @paid="uploadError = null"
+  />
 </template>

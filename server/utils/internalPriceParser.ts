@@ -616,9 +616,16 @@ function headerTextLooksLikePriceColumn(text: string) {
     .test(text)
 }
 
+function headerTextLooksLikeSpecColumn(text: string) {
+  const normalized = normaliseHeader(text)
+  if (!normalized) return false
+  return /\b(?:beam\s*angle|viewing\s*angle|lumens?|lumen|watt(?:age)?|watts?|cct|cri|ip|pf|power\s*factor|voltage|volt|hz|led\s*type|ledtype|cut\s*out|cutout|dimension|diameter|height|width|length|body\s*color|body\s*colour|color|colour|finish|material|image|photo)\b/.test(normalized)
+}
+
 function headerTextLooksLikeDescriptorOnly(text: string) {
   const normalized = normaliseHeader(text)
   return /^(cond|conductor|cond const|amps?|no of pair size|no of pair|item|items?|description|size|sizes?|sku|code)$/.test(normalized)
+    || headerTextLooksLikeSpecColumn(text)
 }
 
 function isHtmlPriceCell(
@@ -636,6 +643,7 @@ function isHtmlPriceCell(
   if (/[a-z]/i.test(cell.text) && !/(?:₹|rs\.?|inr)/i.test(cell.text)) return false
 
   const headerText = headerContextForColumn(grid, rowIndex, colIndex, sectionStart).join(' ')
+  if (headerTextLooksLikeSpecColumn(headerText)) return false
   if (headerTextLooksLikeDescriptorOnly(headerText) && !headerTextLooksLikePriceColumn(headerText)) return false
   if (price < 100 && !/\b(rate|price|mrp|amount|cost)\b/i.test(headerText)) return false
 
@@ -645,7 +653,14 @@ function isHtmlPriceCell(
     .filter(left => left.originRow === rowIndex && left.text && !isUnavailableCell(left.text))
     .map(left => left.text)
   const hasPriceHeader = headerTextLooksLikePriceColumn(headerText)
-  return currentLeftText.length > 0 || hasPriceHeader
+  if (hasPriceHeader) return true
+
+  const cellsToRight = row
+    .slice(colIndex + 1)
+    .filter(right => right.originRow === rowIndex && right.text && !isUnavailableCell(right.text))
+  if (cellsToRight.length > 1) return false
+
+  return currentLeftText.length > 0 && price >= 1000
 }
 
 function priceGroupsForRow(grid: HtmlGridCell[][], rowIndex: number, sectionStart: number) {

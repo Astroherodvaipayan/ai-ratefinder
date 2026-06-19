@@ -49,6 +49,32 @@ async function signOut() {
   await navigateTo('/login')
 }
 
+const profileMenuItems = computed(() => [
+  [
+    {
+      label: user.value?.email || 'Signed in',
+      icon: 'i-lucide-user',
+      disabled: true
+    }
+  ],
+  [
+    {
+      label: 'API Cost',
+      icon: 'i-lucide-wallet-cards',
+      active: route.path.startsWith('/api-cost'),
+      onSelect: () => navigateTo('/api-cost')
+    }
+  ],
+  [
+    {
+      label: 'Sign out',
+      icon: 'i-lucide-log-out',
+      color: 'error' as const,
+      onSelect: signOut
+    }
+  ]
+])
+
 function persistSidebar() {
   if (!import.meta.client) return
   localStorage.setItem('ratefinder:sidebar-collapsed', collapsed.value ? '1' : '0')
@@ -179,18 +205,25 @@ const navItems = [
         >
           <NuxtLink
             :to="`/chats/${c.id}`"
-            class="min-w-0 flex-1 truncate px-2 py-2 text-sm"
+            class="flex min-w-0 flex-1 items-center gap-1.5 truncate px-2 py-2 text-sm"
             :aria-label="collapsed ? c.title : undefined"
           >
-            <UIcon v-if="collapsed" :name="isPinned(c.id) ? 'i-lucide-pin' : 'i-lucide-message-square'" />
-            <span v-else class="truncate">{{ c.title }}</span>
+            <UIcon v-if="collapsed" :name="isPinned(c.id) ? 'i-lucide-bookmark' : 'i-lucide-message-square'" />
+            <template v-else>
+              <UIcon
+                v-if="isPinned(c.id)"
+                name="i-lucide-bookmark"
+                class="shrink-0 text-[13px] text-muted"
+              />
+              <span class="truncate">{{ c.title }}</span>
+            </template>
           </NuxtLink>
           <template v-if="!collapsed">
             <UButton
               size="xs"
               variant="ghost"
-              class="rounded-md"
-              :icon="isPinned(c.id) ? 'i-lucide-pin-off' : 'i-lucide-pin'"
+              class="rounded-md opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+              :icon="isPinned(c.id) ? 'i-lucide-bookmark-x' : 'i-lucide-bookmark'"
               :aria-label="isPinned(c.id) ? 'Unpin chat' : 'Pin chat'"
               @click.prevent="togglePin(c)"
             />
@@ -198,7 +231,7 @@ const navItems = [
               size="xs"
               variant="ghost"
               color="error"
-              class="rounded-md"
+              class="rounded-md opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
               icon="i-lucide-trash-2"
               aria-label="Delete chat"
               @click.prevent="deleteChat(c)"
@@ -211,15 +244,20 @@ const navItems = [
       </div>
 
       <div class="border-t border-default/80 px-3 py-3 text-xs text-muted">
-        <div class="flex items-center justify-between gap-2">
-          <span v-if="!collapsed" class="truncate">{{ user?.email }}</span>
-          <UButton
-            size="xs"
-            variant="ghost"
-            icon="i-lucide-log-out"
-            :aria-label="collapsed ? 'Sign out' : undefined"
-            @click="signOut"
-          />
+        <div
+          class="flex items-center gap-2"
+          :class="collapsed ? 'justify-center' : 'justify-between'"
+        >
+          <span v-if="!collapsed" class="min-w-0 truncate">{{ user?.email }}</span>
+          <UDropdownMenu :items="profileMenuItems">
+            <UButton
+              size="xs"
+              variant="ghost"
+              icon="i-lucide-settings"
+              class="shrink-0 rounded-md"
+              :aria-label="collapsed ? 'Profile settings' : 'Open profile settings'"
+            />
+          </UDropdownMenu>
         </div>
       </div>
     </aside>

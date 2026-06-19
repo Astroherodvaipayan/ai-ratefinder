@@ -5,6 +5,8 @@ import {
   documentUploadSizeError
 } from '~~/shared/documentUpload'
 import { ensureUploadBucketLimit } from '../../utils/uploadBucket'
+import { getBillingUsageSummary } from '../../utils/billing'
+import { adminClient } from '../../utils/supabase'
 
 const Body = z.object({
   filename: z.string().min(1),
@@ -29,6 +31,15 @@ export default defineEventHandler(async (event) => {
     throw createError({
       statusCode: 413,
       statusMessage: documentUploadSizeError(body.filename, body.size)
+    })
+  }
+
+  const usage = await getBillingUsageSummary(adminClient(), user.id)
+  if (usage.requires_payment) {
+    throw createError({
+      statusCode: 402,
+      statusMessage: 'API credit balance is exhausted. Add a payment reference to continue uploading.',
+      data: { billing: usage }
     })
   }
 

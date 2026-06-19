@@ -103,7 +103,7 @@ function attributesFromText(text: string): PriceCandidate['attributes_json'] {
   const normalized = normalizeSearchText(text)
   const attributes: PriceCandidate['attributes_json'] = []
 
-  for (const match of normalized.matchAll(/\b(\d+(?:\.\d+)?)\s*(sqmm|mm|meter|kg|core|piece|box|coil|pair)\b/g)) {
+  for (const match of normalized.matchAll(/\b(\d+(?:\.\d+)?)\s*(sqmm|mm|meter|kg|core|piece|box|bag|case|coil|roll|pair|packet|set|sqft|sqm|tin|ton|unit|dozen)\b/g)) {
     const value = match[1]
     const unit = match[2]
     if (!value || !unit) continue
@@ -140,7 +140,7 @@ function sqlTermVariants(value: string) {
 
 function highSignalProductTerms(parsed: ParsedUserItemQuery) {
   return parsed.product_terms.filter(term =>
-    /^(?:copper|aluminium|fr|frls|frlsh|hffr|zhfr|armoured|armored|unarmoured|unarmored|screened|submersible)$/i.test(term)
+    /^(?:copper|aluminium|fr|frls|frlsh|hffr|zhfr|armoured|armored|unarmoured|unarmored|screened|shielded|submersible|xlpe)$/i.test(term)
   )
 }
 
@@ -178,7 +178,7 @@ export function buildLegacyStructuredRecallQueries(parsed: ParsedUserItemQuery):
       structuredQueries.push({
         terms: uniqueText([
           coreTerm,
-          ...variantTerms.filter(term => /^(?:copper|aluminium|screened|submersible)$/i.test(term))
+          ...variantTerms.filter(term => /^(?:copper|aluminium|screened|shielded|submersible|xlpe)$/i.test(term))
         ]),
         score: 0.92
       })
@@ -210,9 +210,13 @@ function legacyAttributes(row: any, searchable: string): PriceCandidate['attribu
     attributes.push({ name: 'size', value: compactNumber(skuSize[1]), unit: 'sqmm' })
   }
 
-  const core = `${rawName} ${unit}`.match(/\b(\d+)\s*core\b/i)
+  const core = `${rawName} ${unit}`.match(/\b(\d+(?:\.\d+)?)\s*core\b/i)
   if (core?.[1]) {
     attributes.push({ name: 'cores', value: compactNumber(core[1]) })
+  }
+
+  if (/\bsq\.?\s*mm\b/i.test(rawName) && /\bsc\b/i.test(rawName)) {
+    attributes.push({ name: 'cores', value: '1' })
   }
 
   const length = `${rawName} ${unit}`.match(/\b(?:fr|frls|frlsh|hffr|zhfr)\s*(\d+(?:\.\d+)?)\s*(?:mtrs?|meter|metre)?\b/i)
@@ -230,19 +234,24 @@ async function canonicalCandidates(
   filters: CandidateFilters,
   limit: number
 ) {
-  const { data, error } = await client.rpc('rf_search_price_items', {
-    q: parsed.normalized_match_query || parsed.normalized_query || parsed.raw_query,
-    lim: limit,
-    tenant: filters.tenantId,
-    filter_vendor: filters.vendorId ?? null,
-    filter_document: filters.documentId ?? null
-  })
+  const [rpcResult, directCandidates] = await Promise.all([
+    client.rpc('rf_search_price_items', {
+      q: parsed.normalized_match_query || parsed.normalized_query || parsed.raw_query,
+      lim: limit,
+      tenant: filters.tenantId,
+      filter_vendor: filters.vendorId ?? null,
+      filter_document: filters.documentId ?? null
+    }),
+    canonicalDirectCandidates(client, parsed, filters, limit)
+  ])
+  const { data, error } = rpcResult
   if (error) {
-    if (/function .*rf_search_price_items|does not exist/i.test(error.message ?? '')) return []
+    if (/function .*rf_search_price_items|does not exist/i.test(error.message ?? '')) {
+      return dedupe(directCandidates).slice(0, limit)
+    }
     throw createError({ statusCode: 500, statusMessage: error.message })
   }
   const rpcCandidates = (data ?? []).map((row: any) => normalizeRpcCandidate(row, 'canonical_sql'))
-  const directCandidates = await canonicalDirectCandidates(client, parsed, filters, limit)
   return dedupe([...rpcCandidates, ...directCandidates]).slice(0, limit)
 }
 
@@ -258,6 +267,10 @@ async function canonicalDirectCandidates(
       const existing = rowsById.get(row.id)
       if (!existing || score > (existing.rank_score ?? 0)) rowsById.set(row.id, { ...row, rank_score: score })
     }
+  }
+  const tasks: Array<Promise<{ data: any[] | null; error: any; score: number }>> = []
+  const enqueue = (query: PromiseLike<{ data: any[] | null; error: any }>, score: number) => {
+    tasks.push(Promise.resolve(query).then(result => ({ ...result, score })))
   }
   const runBaseQuery = () => {
     let query = client
@@ -292,11 +305,10 @@ async function canonicalDirectCandidates(
     ].filter(Boolean) as string[])
     for (const variant of wireVariantTerms) {
       for (const size of sizeValues) {
-        const { data, error } = await runBaseQuery()
+        enqueue(runBaseQuery()
           .ilike('searchable_text', `%${sqlLikeTerm(variant)}%`)
           .ilike('searchable_text', `%${sqlLikeTerm(size)}%`)
-          .limit(Math.max(limit, 160))
-        if (!error) addRows(data as any[], 0.94)
+          .limit(Math.max(limit, 160)), 0.94)
       }
     }
   }
@@ -306,8 +318,7 @@ async function canonicalDirectCandidates(
     for (const term of focusedTerms) {
       query = query.ilike('searchable_text', `%${term.replace(/[%_]/g, '')}%`)
     }
-    const { data, error } = await query
-    if (!error) addRows(data as any[], 0.9)
+    enqueue(query, 0.9)
   }
 
   for (const hint of parsed.attribute_hints.slice(0, 4)) {
@@ -321,10 +332,9 @@ async function canonicalDirectCandidates(
       { name: hint.name, value: Number.isFinite(numeric) ? numeric.toFixed(2) : hint.value }
     ].filter(item => item.value && item.value !== 'NaN')
     for (const variant of variants) {
-      const { data, error } = await runBaseQuery()
+      enqueue(runBaseQuery()
         .contains('attributes_json', JSON.stringify([variant]))
-        .limit(Math.max(limit, 120))
-      if (!error) addRows(data as any[], 0.82)
+        .limit(Math.max(limit, 120)), 0.82)
     }
   }
 
@@ -340,16 +350,19 @@ async function canonicalDirectCandidates(
         ]
       })
       .join(',')
-    const { data, error } = await runBaseQuery().or(escaped).limit(Math.max(limit, 80))
-    if (!error) addRows(data as any[], 0.62)
+    enqueue(runBaseQuery().or(escaped).limit(Math.max(limit, 80)), 0.62)
   }
 
   const compact = parsed.normalized_query.replace(/\s+/g, '%')
-  if (compact && rowsById.size < limit) {
-    const { data, error } = await runBaseQuery()
+  if (compact) {
+    enqueue(runBaseQuery()
       .ilike('searchable_text', `%${compact}%`)
-      .limit(limit)
-    if (!error) addRows(data as any[], 0.58)
+      .limit(limit), 0.58)
+  }
+
+  const results = await Promise.all(tasks)
+  for (const result of results) {
+    if (!result.error) addRows(result.data as any[], result.score)
   }
 
   return dedupe([...rowsById.values()].map((row: any) => {

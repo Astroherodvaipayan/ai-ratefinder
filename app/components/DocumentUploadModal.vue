@@ -23,6 +23,8 @@ const {
   isDragging,
   uploading,
   uploadError,
+  budgetPaymentOpen,
+  budgetUsage,
   uploadProgress,
   uploadPhase,
   uploadLabel,
@@ -194,4 +196,10 @@ function onOverlayKeydown(e: KeyboardEvent) {
       </div>
     </div>
   </Teleport>
+
+  <ApiBudgetPaymentModal
+    v-model:open="budgetPaymentOpen"
+    :usage="budgetUsage"
+    @paid="uploadError = null"
+  />
 </template>

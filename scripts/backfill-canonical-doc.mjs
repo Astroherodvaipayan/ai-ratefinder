@@ -69,9 +69,9 @@ if (!tables.length) {
   process.exit(0)
 }
 
-await checked(supabase.from('doc_price_items').delete().eq('document_id', documentId), 'delete doc_price_items')
-await checked(supabase.from('doc_table_cells').delete().eq('document_id', documentId), 'delete doc_table_cells')
-await checked(supabase.from('doc_tables').delete().eq('document_id', documentId), 'delete doc_tables')
+await deleteRowsByDocument('doc_price_items', documentId)
+await deleteRowsByDocument('doc_table_cells', documentId)
+await deleteRowsByDocument('doc_tables', documentId)
 
 let insertedTables = 0
 let insertedCells = 0
@@ -177,7 +177,9 @@ function extractTables(markdownHtml) {
     const start = match.index
     const before = markdownHtml.slice(Math.max(0, start - 5000), start)
     const pageMatches = [...before.matchAll(/class="page-number"[^>]*>\s*(\d+)\s*</gi)]
-    const page = pageMatches.length ? Number(pageMatches.at(-1)?.[1]) : null
+    const fullBefore = markdownHtml.slice(0, start)
+    const pageContainerMatches = [...fullBefore.matchAll(/class=["'][^"']*\bpage-body-container\b[^"']*["']/gi)]
+    const page = pageMatches.length ? Number(pageMatches.at(-1)?.[1]) : pageContainerMatches.length || null
     tables.push({ html: match[0], page: Number.isFinite(page) ? page : null })
   }
   return tables
@@ -220,4 +222,22 @@ async function checked(query, action) {
     throw new Error(`${action} failed because Supabase PostgREST has not reloaded the schema cache. Run: notify pgrst, 'reload schema';`)
   }
   throw error
+}
+
+async function deleteRowsByDocument(table, documentId) {
+  for (;;) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('id')
+      .eq('document_id', documentId)
+      .limit(500)
+    if (error) throw error
+    const ids = (data ?? []).map(row => row.id)
+    if (!ids.length) return
+
+    await checked(
+      supabase.from(table).delete().in('id', ids),
+      `delete ${table}`
+    )
+  }
 }

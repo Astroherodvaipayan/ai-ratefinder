@@ -70,7 +70,7 @@ export function inferPriceBasis(input: PriceBasisInput): PriceBasisSummary {
   } else if (packedLength?.[1] && packedLength[2]) {
     quantity = Number(packedLength[1])
     basisUnit = normalizeUnit(packedLength[2])
-    packUnit = normalizeUnit(packedLength[3]) ?? packedLength[3]
+    packUnit = normalizeUnit(packedLength[3]) ?? packedLength[3] ?? null
   } else if (packedUnit?.[1] && packedUnit[2]) {
     quantity = Number(packedUnit[1])
     basisUnit = normalizeUnit(packedUnit[2])

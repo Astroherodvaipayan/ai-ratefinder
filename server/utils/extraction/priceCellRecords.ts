@@ -1,6 +1,8 @@
 import type { CanonicalAttribute, CanonicalTable, CanonicalTableCell } from './canonicalizeTable'
 import { normalizeSearchText, parsePriceNumber, uniqueText } from '../search/text'
 
+const MAX_DB_PRICE = 999_999_999_999.99
+
 export interface CanonicalPriceItemInput {
   tenant_id: string
   document_id: string
@@ -98,6 +100,7 @@ export function buildSearchableText(params: {
 export function priceCellToRecord(params: CanonicalPriceItemInput): CanonicalPriceItemInsert | null {
   const price = parsePriceNumber(params.cell.raw_cell_value)
   if (price === null) return null
+  if (!Number.isFinite(price) || Math.abs(price) > MAX_DB_PRICE) return null
 
   const descriptionText = uniqueText([
     ...params.table.section_breadcrumb,
