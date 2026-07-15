@@ -12,6 +12,8 @@ const { data: chats, refresh: fetchChats } = useFetch<Chat[]>('/api/chats', {
 })
 const collapsed = ref(false)
 const pinnedIds = ref<string[]>([])
+const exportingChatIds = ref<string[]>([])
+const toast = useToast()
 const sortedChats = computed(() => {
   const pinned = new Set(pinnedIds.value)
   return [...chats.value].sort((a, b) => {
@@ -47,6 +49,29 @@ async function signOut() {
   const supabase = useSupabaseClient()
   await supabase.auth.signOut()
   await navigateTo('/login')
+}
+
+async function exportChat(chat: Chat) {
+  if (exportingChatIds.value.includes(chat.id)) return
+  exportingChatIds.value = [...exportingChatIds.value, chat.id]
+
+  try {
+    await downloadChatExport(chat.id, chat.title)
+    toast.add({
+      title: 'Chat export ready',
+      description: `“${chat.title}” downloaded.`,
+      icon: 'i-lucide-circle-check'
+    })
+  } catch (err: any) {
+    toast.add({
+      title: 'Export failed',
+      description: err?.message || 'Please try again.',
+      color: 'error',
+      icon: 'i-lucide-circle-alert'
+    })
+  } finally {
+    exportingChatIds.value = exportingChatIds.value.filter(id => id !== chat.id)
+  }
 }
 
 const profileMenuItems = computed(() => [
@@ -99,6 +124,33 @@ function togglePin(chat: Chat) {
     ? pinnedIds.value.filter(id => id !== chat.id)
     : [chat.id, ...pinnedIds.value]
   persistPins()
+}
+
+function chatMenuItems(chat: Chat) {
+  const isExporting = exportingChatIds.value.includes(chat.id)
+  return [
+    [
+      {
+        label: isPinned(chat.id) ? 'Unpin chat' : 'Pin chat',
+        icon: isPinned(chat.id) ? 'i-lucide-bookmark-x' : 'i-lucide-bookmark',
+        onSelect: () => togglePin(chat)
+      },
+      {
+        label: isExporting ? 'Exporting…' : 'Export chat',
+        icon: isExporting ? 'i-lucide-loader-circle' : 'i-lucide-download',
+        disabled: isExporting,
+        onSelect: () => exportChat(chat)
+      }
+    ],
+    [
+      {
+        label: 'Delete chat',
+        icon: 'i-lucide-trash-2',
+        color: 'error' as const,
+        onSelect: () => deleteChat(chat)
+      }
+    ]
+  ]
 }
 
 async function deleteChat(chat: Chat) {
@@ -219,23 +271,16 @@ const navItems = [
             </template>
           </NuxtLink>
           <template v-if="!collapsed">
-            <UButton
-              size="xs"
-              variant="ghost"
-              class="rounded-md opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-              :icon="isPinned(c.id) ? 'i-lucide-bookmark-x' : 'i-lucide-bookmark'"
-              :aria-label="isPinned(c.id) ? 'Unpin chat' : 'Pin chat'"
-              @click.prevent="togglePin(c)"
-            />
-            <UButton
-              size="xs"
-              variant="ghost"
-              color="error"
-              class="rounded-md opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-              icon="i-lucide-trash-2"
-              aria-label="Delete chat"
-              @click.prevent="deleteChat(c)"
-            />
+            <UDropdownMenu :items="chatMenuItems(c)">
+              <UButton
+                size="xs"
+                variant="ghost"
+                class="rounded-md opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+                icon="i-lucide-ellipsis"
+                :aria-label="`Chat actions for ${c.title}`"
+                @click.prevent.stop
+              />
+            </UDropdownMenu>
           </template>
         </div>
         <div v-if="!chats.length && !collapsed" class="px-2 py-4 text-xs text-muted">
