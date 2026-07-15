@@ -91,6 +91,8 @@ const { data: docs, refresh: refreshDocs } = useFetch<Doc[]>('/api/documents', {
 })
 
 const uploadOpen = ref(false)
+const exporting = ref(false)
+const toast = useToast()
 
 const input = ref('')
 const sending = ref(false)
@@ -354,6 +356,28 @@ async function openProforma() {
   if (chat.value?.quotation_id) await navigateTo(`/quotations/${chat.value.quotation_id}`)
 }
 
+async function exportCurrentChat() {
+  if (!chat.value || exporting.value) return
+  exporting.value = true
+  try {
+    await downloadChatExport(chat.value.id, chat.value.title)
+    toast.add({
+      title: 'Chat export ready',
+      description: `“${chat.value.title}” downloaded.`,
+      icon: 'i-lucide-circle-check'
+    })
+  } catch (err: any) {
+    toast.add({
+      title: 'Export failed',
+      description: err?.message || 'Please try again.',
+      color: 'error',
+      icon: 'i-lucide-circle-alert'
+    })
+  } finally {
+    exporting.value = false
+  }
+}
+
 function sourceHref(item: Pick<CardItem, 'doc_price_item_id' | 'doc_item_id'>) {
   const sourceId = item.doc_price_item_id || item.doc_item_id
   return sourceId ? `/source/${sourceId}` : null
@@ -438,6 +462,18 @@ async function onDocumentsUploaded() {
           </p>
         </div>
         <div class="flex shrink-0 items-center gap-2">
+          <UButton
+            size="sm"
+            variant="soft"
+            color="neutral"
+            icon="i-lucide-download"
+            :loading="exporting"
+            :disabled="exporting || !chat"
+            aria-label="Export this chat"
+            @click="exportCurrentChat"
+          >
+            <span class="hidden sm:inline">Export</span>
+          </UButton>
           <UButton
             size="sm"
             variant="soft"
