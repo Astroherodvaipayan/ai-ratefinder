@@ -1,4 +1,11 @@
 <script setup lang="ts">
+import {
+  documentStatusLabel,
+  isDocumentActivelyProcessing,
+  isDocumentStalled,
+  isProcessingDocument
+} from '~/utils/documentStatus'
+
 definePageMeta({ layout: 'default' })
 
 const route = useRoute()
@@ -7,7 +14,7 @@ const user = useSupabaseUser()
 
 interface DocDetail {
   id: string; owner_id: string; filename: string; status: string; page_count: number | null
-  parsed_markdown: string | null; mime: string | null; parsed_with_internal?: boolean
+  parsed_markdown: string | null; mime: string | null; updated_at: string; parsed_with_internal?: boolean
   vendor: { id: string; name: string } | null
   items: Array<{
     id: string; raw_name: string; sku: string | null; unit: string | null
@@ -30,7 +37,9 @@ const reparseError = ref<string | null>(null)
 const vendorEditError = ref<string | null>(null)
 
 const isImageSource = computed(() => fileMime.value?.startsWith('image/') ?? false)
-const isProcessing = computed(() => doc.value && ['uploading', 'ocr', 'extracting'].includes(doc.value.status))
+const isProcessing = computed(() => Boolean(doc.value && isProcessingDocument(doc.value)))
+const isStalled = computed(() => Boolean(doc.value && isDocumentStalled(doc.value)))
+const isActivelyProcessing = computed(() => Boolean(doc.value && isDocumentActivelyProcessing(doc.value)))
 const markdownText = computed(() => doc.value?.parsed_markdown?.trim() || '')
 const parsedOutputIsHtml = computed(() => /<\/?(table|html|body|thead|tbody|tr|td|th|p|div|h[1-6])[\s>]/i.test(markdownText.value))
 const canManageDocument = computed(() => Boolean(doc.value?.owner_id && user.value?.id && doc.value.owner_id === user.value.id))
@@ -55,7 +64,7 @@ async function reparseDocument() {
     reparseError.value = 'Only the uploader can reparse this shared document.'
     return
   }
-  if (reparsing.value || isProcessing.value) return
+  if (reparsing.value || isActivelyProcessing.value) return
   reparsing.value = true
   reparseError.value = null
   try {
@@ -64,7 +73,7 @@ async function reparseDocument() {
     if (!pollTimer) {
       pollTimer = setInterval(async () => {
         await refresh()
-        if (!isProcessing.value && pollTimer) {
+        if (!isActivelyProcessing.value && pollTimer) {
           clearInterval(pollTimer)
           pollTimer = null
         }
@@ -115,10 +124,10 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   loadSource().catch(() => {})
-  if (isProcessing.value) {
+  if (isActivelyProcessing.value) {
     pollTimer = setInterval(async () => {
       await refresh()
-      if (!isProcessing.value && pollTimer) {
+      if (!isActivelyProcessing.value && pollTimer) {
         clearInterval(pollTimer)
         pollTimer = null
       }
@@ -147,7 +156,7 @@ onBeforeUnmount(() => {
         <p class="text-xs text-muted">
           {{ doc.vendor?.name ?? 'Unassigned vendor' }} ·
           {{ doc.items.length }} items ·
-          status: {{ doc.status }}
+          status: {{ documentStatusLabel(doc) }}
           <span v-if="doc.page_count"> · {{ doc.page_count }} pages</span>
         </p>
       </div>
@@ -168,7 +177,7 @@ onBeforeUnmount(() => {
           variant="soft"
           icon="i-lucide-refresh-cw"
           :loading="reparsing"
-          :disabled="isProcessing"
+          :disabled="isActivelyProcessing"
           @click="reparseDocument"
         >
           Reparse
@@ -182,6 +191,10 @@ onBeforeUnmount(() => {
     <p v-if="reparseError || vendorEditError" class="border-b border-error bg-error/10 px-6 py-2 text-xs text-error">
       {{ reparseError || vendorEditError }}
     </p>
+    <div v-else-if="isStalled" class="flex items-center gap-2 border-b border-error bg-error/10 px-6 py-2 text-xs text-error">
+      <UIcon name="i-lucide-circle-alert" class="shrink-0" aria-hidden="true" />
+      <span>Processing stopped before completion. Use Reparse to try this document again.</span>
+    </div>
 
     <div class="flex flex-1 overflow-hidden">
       <div class="flex flex-1 flex-col overflow-hidden">
@@ -242,7 +255,10 @@ onBeforeUnmount(() => {
               class="whitespace-pre-wrap rounded-lg border border-default bg-elevated p-4 text-xs leading-5"
             >{{ markdownText }}</pre>
             <div v-else class="mt-10 text-sm text-muted">
-              <p v-if="isProcessing">
+              <p v-if="isStalled">
+                Processing stopped before parser output was saved. Use Reparse to try again.
+              </p>
+              <p v-else-if="isProcessing">
                 Reading is still running. This view will fill as soon as output is saved.
               </p>
               <p v-else>

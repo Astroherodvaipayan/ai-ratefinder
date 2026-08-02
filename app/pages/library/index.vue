@@ -9,13 +9,19 @@ import {
   uploadDocumentDirect,
   type ApiBudgetUsage
 } from '~/utils/directDocumentUpload'
+import {
+  documentStageLabel,
+  documentStatusLabel,
+  isDocumentActivelyProcessing,
+  isDocumentStalled
+} from '~/utils/documentStatus'
 
 definePageMeta({ layout: 'default' })
 
 interface Doc {
   id: string; owner_id: string; filename: string; mime: string | null; size: number | null
   status: string; page_count: number | null; error: string | null
-  created_at: string; item_count: number; parsed_with_internal?: boolean
+  created_at: string; updated_at: string; item_count: number; parsed_with_internal?: boolean
   vendor: { id: string; name: string } | null
 }
 
@@ -43,8 +49,8 @@ const uploadLabel = computed(() =>
       ? 'Upload complete. Reading and indexing are running in the background.'
       : 'Drop to upload'
 )
-const hasProcessingDocs = computed(() =>
-  docs.value.some(d => ['uploading', 'ocr', 'extracting'].includes(d.status))
+const hasActiveProcessingDocs = computed(() =>
+  docs.value.some(d => isDocumentActivelyProcessing(d))
 )
 const trimmedVendorName = computed(() => vendorName.value.trim())
 const groupedDocs = computed(() => {
@@ -63,25 +69,11 @@ function startPolling() {
   if (pollTimer) return
   pollTimer = setInterval(async () => {
     await refresh()
-    if (!hasProcessingDocs.value && pollTimer) {
+    if (!hasActiveProcessingDocs.value && pollTimer) {
       clearInterval(pollTimer)
       pollTimer = null
     }
   }, 3000)
-}
-
-function statusProgress(status: string) {
-  if (status === 'uploading') return 15
-  if (status === 'ocr') return 45
-  if (status === 'extracting') return 78
-  return status === 'parsed' ? 100 : 0
-}
-
-function statusText(status: string) {
-  if (status === 'ocr') return 'Reading document'
-  if (status === 'extracting') return 'Indexing price rows'
-  if (status === 'uploading') return 'Uploading'
-  return status
 }
 
 function canManageDocument(doc: Pick<Doc, 'owner_id'>) {
@@ -213,9 +205,9 @@ function onDrop(e: DragEvent) {
   if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files)
 }
 
-const statusColor = (s: string) =>
-  s === 'parsed' ? 'success'
-  : s === 'failed' ? 'error'
+const statusColor = (doc: Doc) =>
+  doc.status === 'parsed' ? 'success'
+  : doc.status === 'failed' || isDocumentStalled(doc) ? 'error'
   : 'warning'
 
 const humanSize = (n: number | null) => {
@@ -225,7 +217,7 @@ const humanSize = (n: number | null) => {
 }
 
 onMounted(() => {
-  if (hasProcessingDocs.value) startPolling()
+  if (hasActiveProcessingDocs.value) startPolling()
 })
 
 onBeforeUnmount(() => {
@@ -334,17 +326,20 @@ onBeforeUnmount(() => {
                       <span v-if="d.page_count"> · {{ d.page_count }} pages</span>
                     </div>
                   </div>
-                  <UBadge :color="statusColor(d.status)" variant="soft" size="sm">
-                    {{ d.status }}
+                  <UBadge :color="statusColor(d)" variant="soft" size="sm">
+                    {{ documentStatusLabel(d) }}
                   </UBadge>
                 </div>
                 <p v-if="d.error" class="mt-1 text-xs text-error">{{ d.error }}</p>
-                <div v-if="['uploading', 'ocr', 'extracting'].includes(d.status)" class="mt-3">
-                  <div class="mb-1 flex items-center justify-between text-xs text-muted">
-                    <span>{{ statusText(d.status) }}</span>
-                    <span>{{ statusProgress(d.status) }}%</span>
+                <div v-if="isDocumentActivelyProcessing(d)" class="mt-3">
+                  <div class="mb-1 text-xs text-muted">
+                    {{ documentStageLabel(d.status) }}
                   </div>
-                  <UProgress :model-value="statusProgress(d.status)" size="sm" />
+                  <UProgress :model-value="null" size="sm" />
+                </div>
+                <div v-else-if="isDocumentStalled(d)" class="mt-3 flex items-start gap-1.5 text-xs text-error">
+                  <UIcon name="i-lucide-circle-alert" class="mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>Processing stopped before completion. Reparse to try again.</span>
                 </div>
                 </NuxtLink>
                 <UButton
@@ -364,7 +359,7 @@ onBeforeUnmount(() => {
                   variant="soft"
                   icon="i-lucide-refresh-cw"
                   :loading="reparsingIds.includes(d.id)"
-                  :disabled="['uploading', 'ocr', 'extracting'].includes(d.status)"
+                  :disabled="isDocumentActivelyProcessing(d)"
                   aria-label="Reparse document"
                   @click="reparseDocument(d)"
                 >
