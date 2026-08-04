@@ -41,6 +41,7 @@ export default defineNuxtConfig({
     geminiApiKey: '',
     sarvamApiKey: '',
     supabaseServiceRoleKey: '',
+    searchV2Enabled: false,
     public: {
       appName: 'AI Ratefinder'
     }

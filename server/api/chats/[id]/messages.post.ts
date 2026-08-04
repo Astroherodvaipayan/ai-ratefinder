@@ -9,8 +9,12 @@
  *   - Returns the assistant message
  */
 import { z } from 'zod'
-import { addDocItemsToQuotation, addPriceItemsToQuotation, ensureChatQuotation } from '../../../utils/quotations'
+import { addCatalogOffersToQuotation, addDocItemsToQuotation, addPriceItemsToQuotation, ensureChatQuotation } from '../../../utils/quotations'
 import { searchItems } from '../../../utils/search/searchItems'
+import type { PriceCandidateSummary, RequestedQuantitySummary } from '../../../utils/search/searchItems'
+import { searchCatalogV2 } from '../../../utils/catalog/searchV2'
+import { catalogChatResponse } from '../../../utils/catalog/chatResponse'
+import { splitCatalogQueries } from '../../../utils/catalog/query'
 
 const Body = z.object({
   content: z.string().min(1),
@@ -37,6 +41,35 @@ export default defineEventHandler(async (event) => {
     chat_id: chatId, role: 'user', content
   })
 
+  const config = useRuntimeConfig()
+  if (config.searchV2Enabled === true || String(config.searchV2Enabled).toLowerCase() === 'true') {
+    const results = await Promise.all(splitCatalogQueries(content).map(message => searchCatalogV2({
+      client,
+      message,
+      documentId,
+      vendorId
+    })))
+    const response = catalogChatResponse(results)
+    const exactOfferIds = response.items
+      .filter(item => !item.needs_review && item.confidence >= 0.85)
+      .map(item => item.catalog_offer_id)
+      .filter((id): id is string => Boolean(id))
+    let quotationId: string | null = chat.quotation_id ?? null
+    if (exactOfferIds.length) {
+      quotationId = await ensureChatQuotation(client, user.id, chat as any, content)
+      await addCatalogOffersToQuotation(client, quotationId, exactOfferIds)
+    }
+    const { data: msg, error } = await client.from('chat_messages').insert({
+      chat_id: chatId,
+      role: 'assistant',
+      content: response.answerText,
+      items: response.items
+    }).select().single()
+    if (error) throw createError({ statusCode: 500, statusMessage: error.message })
+    await touchChat(client, chat, content)
+    return { ...msg, quotation_id: quotationId }
+  }
+
   const deterministic = await searchItems({
     client,
     tenantId: user.id,
@@ -54,7 +87,7 @@ export default defineEventHandler(async (event) => {
     unit: item.unit,
     price: item.price,
     moq: item.moq,
-    currency: item.currency,
+    currency: 'INR',
     vendor: item.vendor ?? 'Unknown vendor',
     source_document: item.source_document,
     source_page: item.source_page,
@@ -70,6 +103,11 @@ export default defineEventHandler(async (event) => {
     requested_quantity: item.requested_quantity ?? null,
     alternatives: item.alternatives ?? []
   }))
+  const unresolvedReviewItems = deterministic.unresolved_items.flatMap(item => {
+    const [primary, ...alternatives] = item.closest_candidates
+    if (!primary) return []
+    return [reviewItemFromCandidate(item.query, primary, alternatives)]
+  })
 
   let quotationId: string | null = chat.quotation_id ?? null
   const highConfidence = deterministic.priced_items.filter(item => !item.needs_review && item.confidence >= 0.85)
@@ -99,23 +137,60 @@ export default defineEventHandler(async (event) => {
     chat_id: chatId,
     role: 'assistant',
     content: deterministic.answer_text,
-    items: replyItems
+    items: [...replyItems, ...unresolvedReviewItems]
   }).select().single()
   if (error) throw createError({ statusCode: 500, statusMessage: error.message })
 
-  // First user message becomes the chat title
-  if (chat.title === 'New chat') {
-    await client.from('chats')
-      .update({ title: content.slice(0, 60), updated_at: new Date().toISOString() })
-      .eq('id', chatId)
-  } else {
-    await client.from('chats')
-      .update({ updated_at: new Date().toISOString() })
-      .eq('id', chatId)
-  }
+  await touchChat(client, chat, content)
 
   return { ...msg, quotation_id: quotationId }
 })
+
+async function touchChat(
+  client: Awaited<ReturnType<typeof userClient>>,
+  chat: { id: string; title: string },
+  content: string
+) {
+  await client.from('chats')
+    .update(chat.title === 'New chat'
+      ? { title: content.slice(0, 60), updated_at: new Date().toISOString() }
+      : { updated_at: new Date().toISOString() })
+    .eq('id', chat.id)
+}
+
+function reviewItemFromCandidate(
+  query: string,
+  candidate: PriceCandidateSummary,
+  alternatives: PriceCandidateSummary[]
+) {
+  return {
+    doc_price_item_id: candidate.doc_price_item_id,
+    doc_item_id: candidate.doc_item_id ?? candidate.doc_price_item_id,
+    product_name: candidate.description,
+    sku: candidate.sku,
+    unit: candidate.unit,
+    price: candidate.price,
+    moq: null,
+    currency: 'INR',
+    vendor: candidate.vendor ?? 'Unknown vendor',
+    source_document: candidate.source_document,
+    source_page: candidate.source_page,
+    confidence: candidate.confidence,
+    needs_review: true,
+    matched_table: null,
+    matched_row: null,
+    matched_column: null,
+    match_explanation: `Possible price for "${query}". Choose this only if the source row matches your BOQ line.`,
+    suggested_query: candidate.suggested_query ?? null,
+    variant_label: candidate.variant_label ?? null,
+    price_basis: candidate.price_basis,
+    requested_quantity: null as RequestedQuantitySummary | null,
+    alternatives: alternatives.map(alt => ({
+      ...alt,
+      needs_review: true
+    }))
+  }
+}
 
 async function persistMatchLogs(
   client: Awaited<ReturnType<typeof userClient>>,

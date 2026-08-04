@@ -15,6 +15,16 @@
     "eval:robust": "node scripts/search-robust.mjs",
     "eval:all-docs": "node scripts/search-all-docs-smoke.mjs",
     "eval:speed": "node scripts/search-speed-check.mjs",
+    "catalog:v2:compile": "node scripts/catalog-v2-compile.mjs",
+    "catalog:v2:compile-all": "node scripts/catalog-v2-compile-all.mjs",
+    "catalog:v2:acceptance": "node scripts/catalog-v2-acceptance.mjs",
+    "catalog:v2:chat-audit": "node scripts/catalog-v2-chat-audit.mjs",
+    "catalog:v2:quality": "node scripts/catalog-v2-quality-audit.mjs",
+    "catalog:v2:import": "node scripts/catalog-v2-import.mjs",
+    "catalog:v2:promote": "node scripts/catalog-v2-promote.mjs",
+    "catalog:v2:replay-chats": "node scripts/catalog-v2-replay-chats.mjs",
+    "catalog:reparse-all": "node scripts/reparse-all-chandra-staged.mjs",
+    "test:catalog": "node --test scripts/catalog-v3-compiler.test.mjs",
     "prod:check": "node scripts/prod-readiness-check.mjs"
   },
   "dependencies": {
