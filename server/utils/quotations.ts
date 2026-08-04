@@ -206,6 +206,93 @@ export async function addPriceItemsToQuotation(
   return lines.length
 }
 
+export async function addCatalogOffersToQuotation(
+  client: SupabaseClient,
+  quotationId: string,
+  catalogOfferIds: string[],
+  quantitiesById: Map<string, QuantitySelection> = new Map()
+): Promise<number> {
+  const orderedIds = [...new Set(catalogOfferIds)].filter(Boolean)
+  if (!orderedIds.length) return 0
+
+  const { data: activeRelease, error: releaseError } = await client
+    .from('catalog_releases')
+    .select('id')
+    .eq('status', 'active')
+    .single()
+  if (releaseError || !activeRelease) {
+    throw createError({ statusCode: 503, statusMessage: 'No active catalogue release is available' })
+  }
+
+  const { data: existingItems } = await client
+    .from('quotation_items')
+    .select('catalog_offer_id, line_no')
+    .eq('quotation_id', quotationId)
+  const existingOfferIds = new Set((existingItems ?? []).map((item: any) => item.catalog_offer_id).filter(Boolean))
+  const nextIds = orderedIds.filter(id => !existingOfferIds.has(id))
+  if (!nextIds.length) return 0
+
+  const { data: offers, error } = await client
+    .from('catalog_offers')
+    .select('id, document_id, canonical_name, sku, amount, basis_quantity, basis_unit, package_type, source_page, documents:document_id(filename, vendor:vendor_id(name))')
+    .eq('release_id', activeRelease.id)
+    .eq('status', 'published')
+    .in('id', nextIds)
+  if (error) throw createError({ statusCode: 500, statusMessage: error.message })
+
+  const offerById = new Map((offers ?? []).map((offer: any) => [offer.id as string, offer]))
+  const lastLine = Math.max(0, ...(existingItems ?? []).map((item: any) => Number(item.line_no) || 0))
+  let nextLineNo = lastLine
+  const lines = nextIds.flatMap(id => {
+    const offer: any = offerById.get(id)
+    if (!offer) return []
+    nextLineNo += 1
+    const rate = quotationRateForBasis(catalogOfferBasis(offer), quantitySelection(quantitiesById.get(id)))
+    return [{
+      quotation_id: quotationId,
+      catalog_offer_id: offer.id,
+      source_document_id: offer.document_id,
+      line_no: nextLineNo,
+      description: offer.canonical_name,
+      sku: offer.sku,
+      unit: rate.unit,
+      vendor: offer.documents?.vendor?.name ?? null,
+      qty: rate.qty,
+      unit_price: rate.unit_price,
+      source_page: offer.source_page
+    }]
+  })
+
+  if (!lines.length) return 0
+  const { error: insertError } = await client.from('quotation_items').insert(lines)
+  if (insertError) throw createError({ statusCode: 500, statusMessage: insertError.message })
+  await client.from('quotations').update({ updated_at: new Date().toISOString() }).eq('id', quotationId)
+  return lines.length
+}
+
+function catalogOfferBasis(offer: {
+  amount: number | string
+  basis_quantity: number | string | null
+  basis_unit: string | null
+  package_type: string | null
+}) {
+  const sourcePrice = Number(offer.amount)
+  const sourceQuantity = Number(offer.basis_quantity ?? 1) || 1
+  const sourceUnit = offer.basis_unit ?? null
+  const sourceLabel = sourceUnit
+    ? [sourceQuantity === 1 ? null : sourceQuantity, sourceUnit, offer.package_type].filter(Boolean).join(' ')
+    : null
+  return {
+    source_price: sourcePrice,
+    source_basis_quantity: sourceQuantity,
+    source_basis_unit: sourceUnit,
+    source_basis_pack_unit: offer.package_type,
+    source_basis_label: sourceLabel,
+    effective_unit_price: sourceUnit ? sourcePrice / sourceQuantity : sourcePrice,
+    effective_unit: sourceUnit
+  }
+}
+
 function quantitySelection(selection: QuantitySelection | undefined): RequestedQuantityLike | null {
   if (typeof selection === 'number') return { value: selection, unit: null }
   return selection ?? null
