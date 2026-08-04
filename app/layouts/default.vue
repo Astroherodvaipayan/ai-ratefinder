@@ -177,6 +177,7 @@ const navItems = [
   { to: '/chats', label: 'Chat', icon: 'i-lucide-message-square' },
   { to: '/dashboard', label: 'Sales', icon: 'i-lucide-chart-column' },
   { to: '/library', label: 'Library', icon: 'i-lucide-library' },
+  { to: '/quarantine', label: 'Catalogue', icon: 'i-lucide-database' },
   { to: '/quotations', label: 'Quotations', icon: 'i-lucide-file-text' },
   { to: '/vendors', label: 'Vendors', icon: 'i-lucide-store' }
 ]
