@@ -6,6 +6,7 @@ const id = computed(() => route.params.id as string)
 const user = useSupabaseUser()
 
 interface CardItem {
+  catalog_offer_id?: string | null
   doc_item_id: string | null
   doc_price_item_id?: string | null
   product_name: string
@@ -44,6 +45,7 @@ interface RequestedQuantity {
   raw: string
 }
 interface CandidateAlternative {
+  catalog_offer_id?: string | null
   doc_item_id: string | null
   doc_price_item_id?: string | null
   description: string
@@ -276,6 +278,7 @@ function messageHasAutoQuotedItems(message: Message) {
 
 function alternativeAsCardItem(base: CardItem, alternative: CandidateAlternative): CardItem {
   return {
+    catalog_offer_id: alternative.catalog_offer_id,
     doc_item_id: alternative.doc_item_id,
     doc_price_item_id: alternative.doc_price_item_id,
     product_name: alternative.description,
@@ -308,11 +311,11 @@ function quoteQuantity(item: Pick<CardItem, 'requested_quantity'>) {
 }
 
 async function addToQuotation(item: CardItem, quotationId: string | null) {
-  if (!item.doc_price_item_id && !item.doc_item_id) {
+  if (!item.catalog_offer_id && !item.doc_price_item_id && !item.doc_item_id) {
     error.value = 'This price candidate has no source record and cannot be added.'
     return
   }
-  if (item.confidence < 0.65) {
+  if (item.confidence < 0.65 && !item.needs_review) {
     error.value = 'This candidate is below the quotation threshold. Open the source or choose a stronger alternative before adding it.'
     return
   }
@@ -335,9 +338,11 @@ async function addToQuotation(item: CardItem, quotationId: string | null) {
   }
   await $fetch(`/api/quotations/${qid}/items`, {
     method: 'POST',
-    body: item.doc_price_item_id
-      ? { doc_price_item_id: item.doc_price_item_id, qty: quoteQuantity(item), requested_unit: item.requested_quantity?.unit ?? null, review_confirmed: !isQuoteReady(item) }
-      : { doc_item_id: item.doc_item_id, qty: quoteQuantity(item), requested_unit: item.requested_quantity?.unit ?? null, review_confirmed: !isQuoteReady(item) }
+    body: item.catalog_offer_id
+      ? { catalog_offer_id: item.catalog_offer_id, qty: quoteQuantity(item), requested_unit: item.requested_quantity?.unit ?? null, review_confirmed: !isQuoteReady(item) }
+      : item.doc_price_item_id
+        ? { doc_price_item_id: item.doc_price_item_id, qty: quoteQuantity(item), requested_unit: item.requested_quantity?.unit ?? null, review_confirmed: !isQuoteReady(item) }
+        : { doc_item_id: item.doc_item_id, qty: quoteQuantity(item), requested_unit: item.requested_quantity?.unit ?? null, review_confirmed: !isQuoteReady(item) }
   })
   showAddMenu.value = null
   // Light toast via console for now
@@ -345,7 +350,7 @@ async function addToQuotation(item: CardItem, quotationId: string | null) {
 }
 
 async function addAlternativeToQuotation(base: CardItem, alternative: CandidateAlternative, quotationId: string | null) {
-  if (alternative.confidence < 0.65) {
+  if (alternative.confidence < 0.65 && !alternative.needs_review) {
     error.value = 'Low-confidence alternatives cannot be added to a quotation.'
     return
   }
@@ -383,19 +388,13 @@ function sourceHref(item: Pick<CardItem, 'doc_price_item_id' | 'doc_item_id'>) {
   return sourceId ? `/source/${sourceId}` : null
 }
 
-function formatMoney(n: number | null, currency = 'INR') {
+function formatMoney(n: number | null, _currency = 'INR') {
   if (n === null) return '—'
-  try {
-    return new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: currency || 'INR',
-      maximumFractionDigits: 2
-    }).format(n)
-  } catch {
-    return `${currency || 'INR'} ${new Intl.NumberFormat('en-IN', {
-      maximumFractionDigits: 2
-    }).format(n)}`
-  }
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 2
+  }).format(n)
 }
 
 const sourceLabel = (item: CardItem) =>
@@ -418,8 +417,18 @@ const effectiveRateLabel = (item: Pick<CardItem, 'price' | 'currency' | 'price_b
   return `${formatMoney(basis.effective_unit_price, item.currency)} / ${basis.effective_unit}`
 }
 
-const confidenceColor = (c: number) =>
-  c >= 0.85 ? 'success' : c >= 0.6 ? 'warning' : 'neutral'
+const confidenceLabel = (confidence: number) => `${Math.round(confidence * 100)}%`
+
+const hasRawSecondCheck = (item: Pick<CardItem, 'match_explanation'>) =>
+  Boolean(item.match_explanation?.toLowerCase().includes('raw document second-check'))
+
+function reviewSummary(item: CardItem) {
+  if (!item.needs_review) return item.match_explanation || null
+  if (hasRawSecondCheck(item)) {
+    return 'Indexed price row matched, and raw document text supports it.'
+  }
+  return 'Confirm the source row before adding this to a quotation.'
+}
 
 const scopeSummary = computed(() => {
   const doc = docs.value.find(d => d.id === selectedDocumentId.value)
@@ -525,16 +534,15 @@ async function onDocumentsUploaded() {
             <article
               v-for="it in m.items"
               :key="it.doc_price_item_id || it.doc_item_id || it.product_name"
-              class="rounded-2xl border bg-default/90 p-4 text-sm shadow-sm"
-              :class="it.needs_review ? 'border-warning/60 ring-1 ring-warning/20' : 'border-default/70'"
+              class="rounded-xl border border-default/70 bg-default/95 p-4 text-sm shadow-sm"
             >
               <div class="flex items-start justify-between gap-3">
                 <h3 class="min-w-0 text-sm font-medium leading-5">{{ it.product_name }}</h3>
                 <div class="flex shrink-0 flex-col items-end gap-1">
-                  <UBadge v-if="it.needs_review" :color="confidenceColor(it.confidence)" variant="soft" size="xs">
-                    Review
+                  <UBadge v-if="it.needs_review" color="neutral" variant="soft" size="xs">
+                    {{ confidenceLabel(it.confidence) }} match
                   </UBadge>
-                  <UBadge :color="it.needs_review ? 'warning' : 'success'" variant="subtle" size="xs">
+                  <UBadge :color="it.needs_review ? 'primary' : 'success'" variant="subtle" size="xs">
                     {{ statusLabel(it) }}
                   </UBadge>
                 </div>
@@ -556,38 +564,81 @@ async function onDocumentsUploaded() {
                 Requested quantity: {{ quantityLabel(it) }}
               </p>
 
-              <p
+              <div
                 v-if="it.needs_review"
-                class="mt-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
+                class="mt-3 rounded-lg border border-default/70 bg-muted/40 px-3 py-2 text-xs"
               >
-                Review required before quotation. This was not auto-added.
-              </p>
+                <div class="flex items-center gap-2 font-medium text-highlighted">
+                  <UIcon name="i-lucide-search-check" class="shrink-0 text-toned" />
+                  <span>Needs confirmation</span>
+                  <UBadge
+                    v-if="hasRawSecondCheck(it)"
+                    color="success"
+                    variant="subtle"
+                    size="xs"
+                    class="ml-auto"
+                  >
+                    Source checked
+                  </UBadge>
+                </div>
+                <p class="mt-1 leading-5 text-muted">
+                  {{ reviewSummary(it) }}
+                </p>
+              </div>
 
-              <dl class="mt-4 grid grid-cols-[72px_1fr] gap-y-1.5 text-xs">
-                <dt class="text-muted">MOQ</dt><dd class="min-w-0 break-words">{{ it.moq ?? '—' }}</dd>
-                <dt class="text-muted">SKU</dt><dd class="min-w-0 break-words">{{ it.sku ?? '—' }}</dd>
-                <dt class="text-muted">Vendor</dt><dd class="min-w-0 break-words">{{ it.vendor }}</dd>
-                <dt class="text-muted">Source</dt><dd class="min-w-0 break-words">{{ sourceLabel(it) }}</dd>
-                <dt v-if="it.variant_label" class="text-muted">Variant</dt>
-                <dd v-if="it.variant_label" class="min-w-0 break-words">{{ it.variant_label }}</dd>
-                <dt v-if="it.matched_table" class="text-muted">Table</dt>
-                <dd v-if="it.matched_table" class="min-w-0 break-words">{{ it.matched_table }}</dd>
-                <dt v-if="it.matched_row || it.matched_column" class="text-muted">Match</dt>
-                <dd v-if="it.matched_row || it.matched_column" class="min-w-0 break-words">
-                  {{ [it.matched_row, it.matched_column].filter(Boolean).join(' · ') }}
-                </dd>
-                <dt v-if="it.match_explanation" class="text-muted">Note</dt>
-                <dd v-if="it.match_explanation" class="min-w-0 break-words">{{ it.match_explanation }}</dd>
-                <dt v-if="it.needs_review && it.suggested_query" class="text-muted">Did you mean</dt>
-                <dd v-if="it.needs_review && it.suggested_query" class="min-w-0 break-words">{{ it.suggested_query }}</dd>
-              </dl>
+              <div class="mt-4 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
+                <div class="min-w-0 rounded-lg bg-muted/40 px-3 py-2">
+                  <p class="text-muted">SKU</p>
+                  <p class="mt-0.5 break-words font-medium text-highlighted">{{ it.sku ?? '—' }}</p>
+                </div>
+                <div class="min-w-0 rounded-lg bg-muted/40 px-3 py-2">
+                  <p class="text-muted">Vendor</p>
+                  <p class="mt-0.5 break-words font-medium text-highlighted">{{ it.vendor }}</p>
+                </div>
+                <div class="min-w-0 rounded-lg bg-muted/40 px-3 py-2">
+                  <p class="text-muted">Source</p>
+                  <p class="mt-0.5 break-words font-medium text-highlighted">{{ sourceLabel(it) }}</p>
+                </div>
+              </div>
+
+              <details class="mt-3 rounded-lg border border-default/70 bg-muted/25 px-3 py-2 text-xs">
+                <summary class="flex cursor-pointer select-none items-center justify-between gap-3 font-medium text-toned">
+                  <span class="inline-flex items-center gap-2">
+                    <UIcon name="i-lucide-list-checks" class="text-muted" />
+                    Source details
+                  </span>
+                  <span class="text-muted">{{ it.matched_table || 'Evidence' }}</span>
+                </summary>
+                <dl class="mt-3 grid grid-cols-[76px_1fr] gap-y-1.5">
+                  <dt class="text-muted">MOQ</dt><dd class="min-w-0 break-words">{{ it.moq ?? '—' }}</dd>
+                  <dt class="text-muted">SKU</dt><dd class="min-w-0 break-words">{{ it.sku ?? '—' }}</dd>
+                  <dt class="text-muted">Vendor</dt><dd class="min-w-0 break-words">{{ it.vendor }}</dd>
+                  <dt class="text-muted">Source</dt><dd class="min-w-0 break-words">{{ sourceLabel(it) }}</dd>
+                  <dt v-if="it.variant_label" class="text-muted">Variant</dt>
+                  <dd v-if="it.variant_label" class="min-w-0 break-words">{{ it.variant_label }}</dd>
+                  <dt v-if="it.matched_table" class="text-muted">Table</dt>
+                  <dd v-if="it.matched_table" class="min-w-0 break-words">{{ it.matched_table }}</dd>
+                  <dt v-if="it.matched_row || it.matched_column" class="text-muted">Match</dt>
+                  <dd v-if="it.matched_row || it.matched_column" class="min-w-0 break-words">
+                    {{ [it.matched_row, it.matched_column].filter(Boolean).join(' · ') }}
+                  </dd>
+                  <dt v-if="it.match_explanation" class="text-muted">Note</dt>
+                  <dd v-if="it.match_explanation" class="min-w-0 break-words">{{ it.match_explanation }}</dd>
+                  <dt v-if="it.needs_review && it.suggested_query" class="text-muted">Did you mean</dt>
+                  <dd v-if="it.needs_review && it.suggested_query" class="min-w-0 break-words">{{ it.suggested_query }}</dd>
+                </dl>
+              </details>
 
               <details
                 v-if="it.alternatives?.length"
-                class="mt-4 rounded-lg border border-default/70 bg-muted/40 px-3 py-2 text-xs"
+                class="mt-3 rounded-lg border border-default/70 bg-muted/25 px-3 py-2 text-xs"
               >
-                <summary class="cursor-pointer select-none font-medium text-toned">
-                  Other possible matches ({{ it.alternatives.length }})
+                <summary class="flex cursor-pointer select-none items-center justify-between gap-3 font-medium text-toned">
+                  <span class="inline-flex items-center gap-2">
+                    <UIcon name="i-lucide-columns-3" class="text-muted" />
+                    Compare rows
+                  </span>
+                  <span class="text-muted">{{ it.alternatives.length }} options</span>
                 </summary>
                 <div class="mt-3 space-y-3">
                   <div
@@ -597,8 +648,8 @@ async function onDocumentsUploaded() {
                   >
                     <div class="flex items-start justify-between gap-3">
                       <p class="min-w-0 leading-5 text-highlighted">{{ alt.description }}</p>
-                      <UBadge :color="alt.confidence >= 0.85 ? 'success' : 'warning'" variant="soft" size="xs">
-                        {{ alt.confidence >= 0.85 ? 'Ready' : 'Review' }}
+                      <UBadge :color="alt.confidence >= 0.85 ? 'success' : 'neutral'" variant="soft" size="xs">
+                        {{ confidenceLabel(alt.confidence) }}
                       </UBadge>
                     </div>
                     <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
@@ -615,7 +666,7 @@ async function onDocumentsUploaded() {
                         Variant: {{ alt.variant_label }}
                       </span>
                       <UDropdownMenu
-                        v-if="alt.confidence >= 0.65"
+                        v-if="alt.needs_review || alt.confidence >= 0.65"
                         :items="[[
                           ...quotations.map(q => ({
                             label: q.title,
@@ -627,13 +678,23 @@ async function onDocumentsUploaded() {
                         ]]"
                       >
                         <UButton size="xs" variant="ghost" icon="i-lucide-check">
-                          Use
+                          Use this row
                         </UButton>
                       </UDropdownMenu>
                     </div>
-                    <p class="mt-1 text-muted">
-                      {{ [alt.vendor, alt.source_document, alt.source_page ? `p.${alt.source_page}` : null].filter(Boolean).join(' · ') || 'Source not stated' }}
-                    </p>
+                    <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-muted">
+                      <span>
+                        {{ [alt.vendor, alt.source_document, alt.source_page ? `p.${alt.source_page}` : null].filter(Boolean).join(' · ') || 'Source not stated' }}
+                      </span>
+                      <NuxtLink
+                        v-if="sourceHref(alt)"
+                        :to="sourceHref(alt)!"
+                        class="inline-flex items-center gap-1 font-medium text-toned transition hover:text-highlighted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-highlighted"
+                      >
+                        <UIcon name="i-lucide-external-link" />
+                        Source
+                      </NuxtLink>
+                    </div>
                     <p v-if="alt.suggested_query" class="mt-1 text-muted">
                       Did you mean: {{ alt.suggested_query }}
                     </p>
@@ -643,7 +704,7 @@ async function onDocumentsUploaded() {
 
               <div class="mt-4 flex flex-wrap items-center justify-between gap-2">
                 <UDropdownMenu
-                  v-if="it.confidence >= 0.65"
+                  v-if="it.needs_review || it.confidence >= 0.65"
                   :items="[[
                     ...quotations.map(q => ({
                       label: q.title,
@@ -654,7 +715,7 @@ async function onDocumentsUploaded() {
                       onSelect: () => addToQuotation(it, null) }
                   ]]"
                 >
-                  <UButton size="xs" variant="soft" :color="it.needs_review ? 'warning' : 'primary'" icon="i-lucide-plus">
+                  <UButton size="xs" variant="soft" color="primary" icon="i-lucide-plus">
                     {{ it.needs_review ? 'Confirm & add' : 'Add' }}
                   </UButton>
                 </UDropdownMenu>
