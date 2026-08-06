@@ -12,6 +12,7 @@ const { data: chats, refresh: fetchChats } = useFetch<Chat[]>('/api/chats', {
 })
 const collapsed = ref(false)
 const pinnedIds = ref<string[]>([])
+const exportingChats = ref(false)
 const exportingChatIds = ref<string[]>([])
 const toast = useToast()
 const sortedChats = computed(() => {
@@ -51,6 +52,30 @@ async function signOut() {
   await navigateTo('/login')
 }
 
+async function exportAllChats() {
+  if (exportingChats.value) return
+  exportingChats.value = true
+
+  try {
+    const result = await downloadAllChatsExport()
+    const count = result.chatCount ?? chats.value.length
+    toast.add({
+      title: 'Chat export ready',
+      description: `${count} ${count === 1 ? 'chat' : 'chats'} downloaded.`,
+      icon: 'i-lucide-circle-check'
+    })
+  } catch (err: any) {
+    toast.add({
+      title: 'Export failed',
+      description: err?.message || 'Please try again.',
+      color: 'error',
+      icon: 'i-lucide-circle-alert'
+    })
+  } finally {
+    exportingChats.value = false
+  }
+}
+
 async function exportChat(chat: Chat) {
   if (exportingChatIds.value.includes(chat.id)) return
   exportingChatIds.value = [...exportingChatIds.value, chat.id]
@@ -88,6 +113,12 @@ const profileMenuItems = computed(() => [
       icon: 'i-lucide-wallet-cards',
       active: route.path.startsWith('/api-cost'),
       onSelect: () => navigateTo('/api-cost')
+    },
+    {
+      label: exportingChats.value ? 'Exporting chats…' : 'Export all chats',
+      icon: exportingChats.value ? 'i-lucide-loader-circle' : 'i-lucide-download',
+      disabled: exportingChats.value || chats.value.length === 0,
+      onSelect: exportAllChats
     }
   ],
   [

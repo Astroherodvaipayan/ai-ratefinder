@@ -66,5 +66,7 @@ export default defineEventHandler(async (event) => {
   setHeader(event, 'Content-Type', 'application/json; charset=utf-8')
   setHeader(event, 'Content-Disposition', `attachment; filename="${filename}"`)
   setHeader(event, 'Cache-Control', 'private, no-store')
+  setHeader(event, 'X-Chat-Count', '1')
+  setHeader(event, 'X-Message-Count', String(messages?.length ?? 0))
   return JSON.stringify(archive, null, 2)
 })
