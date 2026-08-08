@@ -49,6 +49,29 @@ test('normalizes formatted, spaced, and numeric SKUs into one searchable identit
   assert.deepEqual(parseCatalogQuery('SKU: AC21104MW').sku_candidates, ['ac21104mw'])
 })
 
+test('never routes product vocabulary through SKU search', () => {
+  for (const query of [
+    '3Pair Telephone Wire (90Mtr) 0.5mm',
+    'CAT-6 305 m',
+    '12 Model Metal Box',
+    '20mm HMS Pipe'
+  ]) {
+    assert.deepEqual(parseCatalogQuery(query).sku_candidates, [], query)
+  }
+})
+
+test('normalizes box, bare wire, pipe, and networking product categories', () => {
+  assert.equal(parseCatalogQuery('12 Model Metal Box').category, 'modular_box')
+  assert.equal(parseCatalogQuery('3Model Surface Box').category, 'modular_box')
+  assert.equal(parseCatalogQuery('1.5 Sqmm 1Core 100 mtr').category, 'single_core_wire')
+  assert.equal(parseCatalogQuery('20mm HMS Pipe').category, 'conduit')
+  assert.equal(parseCatalogQuery('1/2 Inch Copper Coated Networking cable').category, 'data_cable')
+  assert.deepEqual(
+    [parseCatalogQuery('CAT-6 305 m').requested_basis_quantity, parseCatalogQuery('CAT-6 305 m').requested_basis_unit],
+    [305, 'meter']
+  )
+})
+
 test('an exact SKU identifies a product without requiring a category', () => {
   const parsed = parseCatalogQuery('BA40630C')
   const result = resolveCatalogOffers(parsed, [offer({
@@ -76,6 +99,38 @@ test('repairs source-backed cable facets from the final row and column identity'
 
   assert.equal(repaired.facets.size_sqmm, 4)
   assert.equal(repaired.facets.cores, 4)
+})
+
+test('source-column variants override noisy row headers without corrupting stored facets', () => {
+  const repaired = repairCatalogOfferIdentity(offer({
+    category: 'single_core_wire',
+    canonical_name: 'FR 300 FRLSH 300 HFFR 300 1.5 SQ.MM — HFFR 300 Mtrs. Coil',
+    source_row_label: 'FR 300 FRLSH 300 HFFR 300 1.5 SQ.MM',
+    source_column_label: 'HFFR 300 Mtrs. Coil',
+    sku: 'HFFR 300',
+    facets: { cores: 1, size_sqmm: 1.5, fire_rating: 'HFFR' },
+    basis_quantity: 300,
+    basis_unit: 'meter',
+    package_type: 'coil'
+  }))
+
+  assert.equal(repaired.facets.fire_rating, 'HFFR')
+})
+
+test('UTP catalogue rows are searchable as unarmoured and reject crossed coaxial SKUs', () => {
+  const repaired = repairCatalogOfferIdentity(offer({
+    category: 'data_cable',
+    canonical_name: 'UTP CAT-6 — LAN CABLES 305 MTRS.',
+    source_row_label: 'UTP CAT-6',
+    source_column_label: 'LAN CABLES 305 MTRS.',
+    sku: 'RG-11F',
+    facets: { standard: 'CAT-6' },
+    basis_quantity: 305,
+    basis_unit: 'meter'
+  }))
+
+  assert.equal(repaired.facets.armour, 'unarmoured')
+  assert.equal(repaired.sku, null)
 })
 
 test('recovers 3 x 300 high-voltage cable identity and uses the final voltage column', () => {
@@ -117,6 +172,42 @@ test('returns refinements when exact catalogue rows differ by a missing commerci
   assert.equal(result.state, 'ambiguous')
   assert.ok(result.missing_facets.includes('curve'))
   assert.deepEqual(result.refinements.find(item => item.facet === 'curve')?.options.map(option => option.label), ['C curve', 'D curve'])
+})
+
+test('treats an unavailable requested pack as a choice instead of a missing product', () => {
+  const parsed = parseCatalogQuery('1.5 Sqmm 1Core 100 mtr FRLSH')
+  const result = resolveCatalogOffers(parsed, [offer({
+    category: 'single_core_wire',
+    canonical_name: '1.5 SQ.MM FRLSH 300 Mtrs. Coil',
+    source_row_label: '1.5 SQ.MM',
+    source_column_label: 'FRLSH 300 Mtrs. Coil',
+    facets: { cores: 1, size_sqmm: 1.5, fire_rating: 'FRLSH' },
+    basis_quantity: 300,
+    basis_unit: 'meter',
+    package_type: 'coil'
+  })])
+
+  assert.equal(result.state, 'ambiguous')
+  assert.ok(result.missing_facets.includes('price_basis'))
+  assert.equal(result.total_matches, 1)
+  assert.match(result.explanation, /requested price basis is not published/i)
+})
+
+test('caps broad result cards while retaining the full match count', () => {
+  const parsed = parseCatalogQuery('10 Amp Switch')
+  const offers = Array.from({ length: 20 }, (_, index) => offer({
+    id: `switch-${index}`,
+    category: 'switch',
+    canonical_name: `10A Switch ${index}`,
+    sku: `SW-${index}`,
+    facets: { current_a: 10, modules: index % 2 + 1 },
+    amount: 100 + index
+  }))
+  const result = resolveCatalogOffers(parsed, offers)
+
+  assert.equal(result.total_matches, 20)
+  assert.equal(result.offers.length, 12)
+  assert.equal(result.state, 'ambiguous')
 })
 
 test('chat cards keep the source pack basis and expose search guidance', () => {

@@ -26,6 +26,7 @@
     "catalog:reparse-all": "node scripts/reparse-all-chandra-staged.mjs",
     "test:catalog": "node --test scripts/catalog-v3-compiler.test.mjs",
     "test:search-v3": "node --test scripts/catalog-v3-search.test.mjs",
+    "test:search-v3:71": "node scripts/catalog-v3-71-live.test.mjs",
     "prod:check": "node scripts/prod-readiness-check.mjs"
   },
   "dependencies": {

@@ -77,7 +77,7 @@ export function parseCatalogQuery(raw: string): CatalogQuery {
   }
   if (/\btpn\b/.test(text)) facets.board_type = 'TPN'
   else if (/\bspn\b/.test(text)) facets.board_type = 'SPN'
-  if (category === 'junction_box') setNumber('size_mm', /\b(\d+(?:\.\d+)?)\s*mm\b/)
+  if (category === 'junction_box' || category === 'conduit') setNumber('size_mm', /\b(\d+(?:\.\d+)?)\s*mm\b/)
   if (category === 'telephone_cable') setNumber('conductor_size_mm', /\b(\d+(?:\.\d+)?)\s*mm\b/)
 
   const voltageSegment = normalizeQuery(raw.split(/[—–]/).at(-1) ?? raw)
@@ -90,7 +90,7 @@ export function parseCatalogQuery(raw: string): CatalogQuery {
   const curve = text.match(/\b([bcd])\s*curve\b/)
   if (curve?.[1]) facets.curve = curve[1].toUpperCase()
 
-  const requestedBasis = requestedBasisFromQuery(text)
+  const requestedBasis = requestedBasisFromQuery(text, category)
   const corrections = queryCorrections(raw)
   return {
     raw,
@@ -115,7 +115,7 @@ function normalizeQuery(value: string) {
     .replace(/\bcabels?\b/g, ' cable ')
     .replace(/\bflx\b/g, ' flexible ')
     .replace(/\b(\d+)\s*p\s*oles?\b/g, '$1 pole ')
-    .replace(/(\d+(?:\.\d+)?)\s*model\s*box\b/g, '$1 module box ')
+    .replace(/(\d+(?:\.\d+)?)\s*model\s*(?:(metal|surface|flush|plastic)\s*)?box\b/g, '$1 module $2 box ')
     .replace(/\bcu\b/g, ' copper ')
     .replace(/\b(?:alu|aluminium|aluminum)\b/g, ' aluminium ')
     .replace(/\bun\s*[-_/]?\s*arm(?:ou?red|ored|d)?\b/g, ' unarmoured ')
@@ -149,19 +149,20 @@ function inferQueryCategory(text: string): CatalogCategory | null {
   if (/\bmcb\b/.test(text)) return 'mcb'
   if (/\bisolator\b/.test(text)) return 'isolator'
   if (/\brg\s*[- ]?\s*(?:6|11|59)\b|coaxial|tv cable/.test(text)) return 'coaxial_cable'
-  if (/\bcat\s*[- ]?\s*(?:5e|6a?|6|7)\b|\butp\b|\bstp\b/.test(text)) return 'data_cable'
+  if (/\bcat\s*[- ]?\s*(?:5e|6a?|6|7)\b|\butp\b|\bstp\b|network(?:ing)?\s+cable|lan\s+cable/.test(text)) return 'data_cable'
   if (/telephone/.test(text)) return 'telephone_cable'
   if (/junction/.test(text)) return 'junction_box'
   if (/\bplug\s*top\b|\b(?:\d+\s*)?pin\s*top\b/.test(text)) return 'accessory'
   if (/\bcombine(?:d)?\s+box\b|\bcombi\s+(?:box|socket)\b/.test(text)) return 'socket'
-  if (/\b\d+\s*(?:m|module)\s+(?:db\s+)?box\b|modular box|module box/.test(text)) return 'modular_box'
+  if (/\b\d+\s*(?:m|module)\s+(?:(?:db|metal|surface|flush|plastic|gi|concealed)\s+)*box\b|modular box|module(?:\s+(?:metal|surface|flush|plastic|gi|concealed))*\s+box/.test(text)) return 'modular_box'
   if (/distribution board|tpn db|spn db|\bdb box\b/.test(text)) return 'distribution_board'
   if (/\bsocket\b/.test(text)) return 'socket'
   if (/\bswitch\b/.test(text)) return 'switch'
   if (/single core|\bwire\b/.test(text) && /frlsh|frls|hffr|zhfr|\bfr\b/.test(text)) return 'single_core_wire'
+  if (/\b1 core\b/.test(text) && /\bsqmm\b/.test(text) && /\b(?:\d+(?:\.\d+)?\s*meter|coil)\b/.test(text)) return 'single_core_wire'
   if (/flexible|\bflx\b/.test(text)) return 'flexible_cable'
   if (/armoured|xlpe|\bcable\b/.test(text) && /sqmm|core|kv/.test(text)) return 'power_cable'
-  if (/conduit/.test(text)) return 'conduit'
+  if (/conduit|\b(?:hms\s+)?pipe\b/.test(text)) return 'conduit'
   return null
 }
 
@@ -182,19 +183,20 @@ function extractSkuCandidates(raw: string) {
     const normalized = normalizeCatalogSku(value)
     if (normalized.length >= 3) candidates.add(normalized)
   }
-  for (const match of raw.matchAll(/\b(?:sku|item\s*code|product\s*code|cat(?:alogue)?\s*(?:no|number)?|model)\s*[:#-]?\s*([a-z0-9][a-z0-9 ./_-]{2,30})/gi)) {
-    add(match[1]?.trim().split(/\s+(?:price|rate|mrp)\b/i)[0])
+  // SKU mode must be explicit. Bare product words such as CAT-6, 3Pair,
+  // 90Mtr, or "12 Model Metal Box" are product language, not catalogue codes.
+  for (const match of raw.matchAll(/\b(?:sku|item\s*code|product\s*code|catalogue\s*(?:no|number)|catalog\s*(?:no|number)|cat\s*(?:no|number)|model\s*(?:no|number))\s*[:#-]?\s*([a-z0-9][a-z0-9._/-]*(?:\s+[a-z0-9][a-z0-9._/-]*)?)/gi)) {
+    add(match[1])
   }
+  if (candidates.size) return [...candidates]
+
   const trimmed = raw.trim()
   const looksLikeStandaloneCode = /^[a-z0-9][a-z0-9 ./_-]{2,30}$/i.test(trimmed)
     && (/\d/.test(trimmed) && /[a-z]/i.test(trimmed) || /^\d{4,}$/.test(trimmed))
-    && !/\b(?:amp|core|pole|sqmm|sq\.?\s*mm|meter|mtr|module|way|kv|cable|wire|box|mcb|socket|switch)\b/i.test(trimmed)
+    && !/\b(?:amp|core|pair|pole|sqmm|sq\.?\s*mm|meter|mtr|module|model|way|kv|cable|wire|box|mcb|socket|switch|telephone|networking|surface|metal|flush|pipe|conduit|fr|frls|frlsh|hffr)\b/i.test(trimmed)
+    && !/(?:^|[\s(/])\d+(?:\.\d+)?\s*(?:a|amp|c|core|p|pole|m|mm|mtr|meter|sqmm|kv|ka)\b/i.test(trimmed)
+    && !/^(?:cat|rg)\s*[- ]?\s*(?:5e|6a?|6|7|11|59)(?:\s+\d+\s*(?:m|mtr|meter))?$/i.test(trimmed)
   if (looksLikeStandaloneCode) add(trimmed)
-  for (const token of raw.match(/[a-z0-9][a-z0-9._/-]*/gi) ?? []) {
-    if (!/\d/.test(token) || !/[a-z]/i.test(token)) continue
-    if (/^\d+(?:\.\d+)?(?:a|amp|c|core|p|pole|m|mm|sqmm|kv|ka)$/i.test(token)) continue
-    if (token.length >= 5) add(token)
-  }
   return [...candidates]
 }
 
@@ -207,7 +209,14 @@ function queryCorrections(raw: string): CatalogQueryCorrection[] {
   add(/\bcabels?\b/i, 'cable', 'spelling')
   add(/\bflx\b/i, 'flexible', 'alias')
   add(/\b(?:alu|aluminum)\b/i, 'aluminium', 'alias')
-  add(/\b(\d+)\s*model\s*box\b/i, `${raw.match(/\b(\d+)\s*model\s*box\b/i)?.[1] ?? ''} module box`.trim(), 'spelling')
+  const modelBox = raw.match(/\b(\d+)\s*model\s*(?:(metal|surface|flush|plastic)\s*)?box\b/i)
+  if (modelBox?.[0]) {
+    corrections.push({
+      from: modelBox[0],
+      to: `${modelBox[1]} Module ${modelBox[2] ? `${modelBox[2]} ` : ''}Box`,
+      kind: 'spelling'
+    })
+  }
   add(/\b(\d+)\s*p\s*oles?\b/i, `${raw.match(/\b(\d+)\s*p\s*oles?\b/i)?.[1] ?? ''} pole`.trim(), 'spelling')
   return corrections
 }
@@ -217,15 +226,19 @@ function applySafeCorrections(raw: string) {
     .replace(/\bcabels?\b/gi, 'cable')
     .replace(/\bflx\b/gi, 'Flexible')
     .replace(/\b(?:alu|aluminum)\b/gi, 'Aluminium')
-    .replace(/\b(\d+)\s*model\s*box\b/gi, '$1 Module Box')
+    .replace(/\b(\d+)\s*model\s*(?:(metal|surface|flush|plastic)\s*)?box\b/gi, '$1 Module $2 Box')
     .replace(/\b(\d+)\s*p\s*oles?\b/gi, '$1 Pole')
     .replace(/\s+/g, ' ')
     .trim()
 }
 
-function requestedBasisFromQuery(text: string) {
+function requestedBasisFromQuery(text: string, category: CatalogCategory | null) {
   const length = text.match(/\b(\d+(?:\.\d+)?)\s*meter\b/)
   if (length?.[1]) return { quantity: Number(length[1]), unit: 'meter' }
+  if (['coaxial_cable', 'data_cable', 'telephone_cable', 'power_cable', 'flexible_cable', 'single_core_wire'].includes(category ?? '')) {
+    const shortLength = text.match(/\b(\d+(?:\.\d+)?)\s*m\b/)
+    if (shortLength?.[1]) return { quantity: Number(shortLength[1]), unit: 'meter' }
+  }
   return { quantity: null, unit: null }
 }
 

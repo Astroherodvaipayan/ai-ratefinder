@@ -10,10 +10,11 @@ export function catalogChatResponse(results: CatalogSearchResult[]) {
       return `• ${result.query.raw}: no published offer matches every specified detail. No substitute was used.${alternatives ? ` ${alternatives} catalogue-backed suggestion${alternatives === 1 ? '' : 's'} available below.` : ''}${correction}`
     }
     if (result.state === 'ambiguous') {
-      return `• ${result.query.raw}: choose ${result.missing_facets.map(prettyFacet).join(', ')} to narrow ${result.offers.length} matching offer${result.offers.length === 1 ? '' : 's'}.${correction}`
+      return `• ${result.query.raw}: choose ${result.missing_facets.map(prettyFacet).join(', ')} to narrow ${result.total_matches} matching offer${result.total_matches === 1 ? '' : 's'}. Showing the best ${result.offers.length}.${correction}`
     }
     const method = result.match_method === 'sku' ? ' by exact SKU' : ''
-    return `• ${result.query.raw}: found ${result.offers.length} source-backed offer${result.offers.length === 1 ? '' : 's'}${method}.${correction}`
+    const displayed = result.total_matches > result.offers.length ? ` Showing the best ${result.offers.length}.` : ''
+    return `• ${result.query.raw}: found ${result.total_matches} source-backed offer${result.total_matches === 1 ? '' : 's'}${method}.${displayed}${correction}`
   })
 
   return {
@@ -33,7 +34,7 @@ function chatItem(result: CatalogSearchResult, offer: CatalogOfferRow) {
   const basisLabel = [basisQuantity === 1 ? null : basisQuantity, offer.basis_unit, offer.package_type]
     .filter(Boolean)
     .join(' ')
-  const requiresChoice = result.state !== 'exact' || result.offers.length > 1
+  const requiresChoice = result.state !== 'exact' || result.total_matches > 1
 
   return {
     kind: 'offer',

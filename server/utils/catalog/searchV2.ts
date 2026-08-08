@@ -37,12 +37,15 @@ export interface CatalogSearchResult {
   state: 'exact' | 'ambiguous' | 'absent'
   match_method: 'sku' | 'facets' | 'none'
   offers: CatalogOfferRow[]
+  total_matches: number
   alternatives: CatalogAlternative[]
   suggestions: CatalogSearchSuggestion[]
   refinements: CatalogRefinement[]
   missing_facets: string[]
   explanation: string
 }
+
+const MAX_DISPLAYED_OFFERS = 12
 
 export interface CatalogAlternative {
   offer: CatalogOfferRow
@@ -165,14 +168,16 @@ export function resolveCatalogOffers(
   options: { identityMatched?: boolean, matchMethod?: CatalogSearchResult['match_method'] } = {}
 ): CatalogSearchResult {
   const hydrated = offers.map(repairCatalogOfferIdentity)
-  const compatible = dedupeCompatibleOffers(hydrated.filter(offer => offerIsCompatible(parsed, offer)))
-  if (!compatible.length) {
+  const brandScoped = offersForRequestedBrand(parsed, hydrated)
+  const productCompatible = dedupeCompatibleOffers(brandScoped.filter(offer => offerIsProductCompatible(parsed, offer)))
+  if (!productCompatible.length) {
     const alternatives = closestAlternatives(parsed, hydrated)
     return {
       query: parsed,
       state: 'absent',
       match_method: options.matchMethod ?? 'none',
       offers: [],
+      total_matches: 0,
       alternatives,
       suggestions: resultSuggestions(parsed, alternatives),
       refinements: [],
@@ -181,18 +186,26 @@ export function resolveCatalogOffers(
     }
   }
 
+  const basisCompatible = productCompatible.filter(offer => offerMatchesRequestedBasis(parsed, offer))
+  const requestedBasisUnavailable = basisWasRequested(parsed) && !basisCompatible.length
+  const compatible = requestedBasisUnavailable ? productCompatible : basisCompatible
   const missingFacets = differentiatingMissingFacets(parsed, compatible, Boolean(options.identityMatched))
+  if (requestedBasisUnavailable && !missingFacets.includes('price_basis')) missingFacets.push('price_basis')
+  const displayedOffers = rankedOffers(parsed, compatible).slice(0, MAX_DISPLAYED_OFFERS)
   return {
     query: parsed,
     state: missingFacets.length ? 'ambiguous' : 'exact',
     match_method: options.matchMethod ?? 'facets',
-    offers: compatible,
+    offers: displayedOffers,
+    total_matches: compatible.length,
     alternatives: [],
     suggestions: resultSuggestions(parsed, []),
     refinements: refinementOptions(parsed, compatible, missingFacets),
     missing_facets: missingFacets,
-    explanation: missingFacets.length
-      ? `The request is underspecified for ${missingFacets.join(', ')}.`
+    explanation: requestedBasisUnavailable
+      ? 'The product exists, but the requested price basis is not published. Choose one of the available pack or length options.'
+      : missingFacets.length
+        ? `The request is underspecified for ${missingFacets.join(', ')}.`
       : 'Every returned offer satisfies the specified product facets.'
   }
 }
@@ -236,6 +249,7 @@ function recoveryIdentityNeedle(parsed: CatalogQuery) {
   if (parsed.category === 'modular_box' && facet.modules !== undefined) return `${facet.modules}%MODULE`
   if ((parsed.category === 'mcb' || parsed.category === 'mccb') && facet.current_a !== undefined) return `${facet.current_a}%A`
   if (parsed.category === 'telephone_cable' && facet.pairs !== undefined) return `${facet.pairs}%PAIR`
+  if (parsed.category === 'conduit' && facet.size_mm !== undefined) return `${facet.size_mm}%MM`
   return null
 }
 
@@ -259,17 +273,48 @@ function hydrateOffers(rows: any[]): CatalogOfferRow[] {
 }
 
 export function repairCatalogOfferIdentity(offer: CatalogOfferRow): CatalogOfferRow {
-  const identityText = [
-    offer.canonical_name,
-    offer.source_row_label,
-    offer.source_column_label
-  ].filter(Boolean).join(' ')
-  const derived = parseCatalogQuery(identityText)
+  const canonical = parseCatalogQuery(offer.canonical_name)
+  const row = parseCatalogQuery(offer.source_row_label ?? '')
+  const column = parseCatalogQuery(offer.source_column_label ?? '')
+  const facets: CatalogFacets = { ...offer.facets }
+
+  // Published facets are the baseline. Source-derived values only fill gaps,
+  // except where the table coordinate owns the identity: rows own product
+  // size, while columns own variants such as core count, voltage and fire
+  // rating. This prevents a noisy table header from overwriting every variant.
+  for (const derived of [canonical.facets, row.facets, column.facets]) {
+    for (const [name, value] of Object.entries(derived)) {
+      if (facets[name] === undefined) facets[name] = value
+    }
+  }
+  if (row.facets.size_sqmm !== undefined) facets.size_sqmm = row.facets.size_sqmm
+  if (row.facets.pairs !== undefined) facets.pairs = row.facets.pairs
+  for (const name of ['cores', 'voltage_grade', 'fire_rating', 'conductor_material', 'armour', 'standard'] as const) {
+    if (column.facets[name] !== undefined) facets[name] = column.facets[name]
+  }
+  if (offer.category === 'power_cable' && column.facets.cores === undefined && row.facets.cores !== undefined) {
+    facets.cores = row.facets.cores
+  }
+  const identity = [offer.canonical_name, offer.source_row_label, offer.source_column_label]
+    .filter(Boolean).join(' ').toLowerCase()
+  if (offer.category === 'data_cable' && /\butp\b/.test(identity) && !/\b(?:armoured|stp|shielded)\b/.test(identity)) {
+    facets.armour = 'unarmoured'
+  }
+  const sku = trustworthyOfferSku(offer)
   return {
     ...offer,
-    normalized_sku: offer.normalized_sku ?? normalizeCatalogSku(offer.sku),
-    facets: { ...offer.facets, ...derived.facets }
+    sku,
+    normalized_sku: normalizeCatalogSku(sku),
+    facets
   }
+}
+
+function trustworthyOfferSku(offer: CatalogOfferRow) {
+  const sku = offer.sku?.trim() || null
+  if (!sku) return null
+  const normalized = normalizeCatalogSku(sku)
+  if (offer.category === 'data_cable' && /^rg(?:6|11|59)f?$/.test(normalized)) return null
+  return sku
 }
 
 function emptyCatalogResult(
@@ -284,6 +329,7 @@ function emptyCatalogResult(
     state,
     match_method: 'none',
     offers: [],
+    total_matches: 0,
     alternatives: [],
     suggestions: [
       ...queryCorrectionSuggestions(query),
@@ -348,16 +394,59 @@ function dedupeCompatibleOffers(offers: CatalogOfferRow[]) {
   return [...byIdentity.values()]
 }
 
-function offerIsCompatible(query: CatalogQuery, offer: CatalogOfferRow) {
+function offersForRequestedBrand(query: CatalogQuery, offers: CatalogOfferRow[]) {
+  const mentioned = new Set(offers.flatMap((offer) => {
+    const brand = offer.brand?.trim()
+    if (!brand) return []
+    const normalized = brand.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    return normalized && query.normalized_text.includes(normalized) ? [normalized] : []
+  }))
+  if (!mentioned.size) return offers
+  return offers.filter((offer) => {
+    const normalized = offer.brand?.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    return normalized ? mentioned.has(normalized) : false
+  })
+}
+
+function rankedOffers(query: CatalogQuery, offers: CatalogOfferRow[]) {
+  return [...offers].sort((left, right) => {
+    const basisDelta = basisRank(query, left) - basisRank(query, right)
+    if (basisDelta) return basisDelta
+    const completenessDelta = Object.keys(right.facets).length - Object.keys(left.facets).length
+    if (completenessDelta) return completenessDelta
+    const brandDelta = String(left.brand ?? '').localeCompare(String(right.brand ?? ''))
+    if (brandDelta) return brandDelta
+    const skuDelta = String(left.sku ?? '').localeCompare(String(right.sku ?? ''))
+    if (skuDelta) return skuDelta
+    return Number(left.amount) - Number(right.amount)
+  })
+}
+
+function basisRank(query: CatalogQuery, offer: CatalogOfferRow) {
+  if (query.requested_basis_quantity !== null || query.requested_basis_unit) return 0
+  if (Number(offer.basis_quantity ?? 1) === 1 && !offer.package_type) return 0
+  if (Number(offer.basis_quantity ?? 1) === 1) return 1
+  return 2
+}
+
+function offerIsProductCompatible(query: CatalogQuery, offer: CatalogOfferRow) {
   if (query.category && offer.category !== query.category) return false
   if (!offerMatchesProductIntent(query, offer)) return false
   for (const [name, expected] of Object.entries(query.facets)) {
     const actual = offer.facets[name]
     if (actual === undefined || !sameFacet(actual, expected)) return false
   }
+  return true
+}
+
+function offerMatchesRequestedBasis(query: CatalogQuery, offer: CatalogOfferRow) {
   if (query.requested_basis_quantity !== null && Number(offer.basis_quantity) !== query.requested_basis_quantity) return false
   if (query.requested_basis_unit && offer.basis_unit !== query.requested_basis_unit) return false
   return true
+}
+
+function basisWasRequested(query: CatalogQuery) {
+  return query.requested_basis_quantity !== null || Boolean(query.requested_basis_unit)
 }
 
 function offerMatchesProductIntent(query: CatalogQuery, offer: CatalogOfferRow) {
@@ -371,6 +460,12 @@ function offerMatchesProductIntent(query: CatalogQuery, offer: CatalogOfferRow) 
   if (query.category === 'data_cable' && /\bcable\b/.test(requested) && /\b(?:socket|jack|rj\s*45|outlet)\b/.test(identity)) {
     return false
   }
+  if (query.category === 'modular_box') {
+    if (/\bmetal\b/.test(requested) && !/\b(?:metal|gi|sheet)\b/.test(identity)) return false
+    if (/\bsurface\b/.test(requested) && !/\bsurface\b/.test(identity)) return false
+    if (/\b(?:flush|concealed)\b/.test(requested) && !/\b(?:flush|concealed)\b/.test(identity)) return false
+  }
+  if (query.category === 'conduit' && /\bhms\b/.test(requested) && !/\bhms\b/.test(identity)) return false
   return true
 }
 
@@ -395,6 +490,14 @@ function differentiatingMissingFacets(query: CatalogQuery, offers: CatalogOfferR
   if (query.requested_basis_quantity === null) {
     const bases = new Set(offers.map(offer => `${offer.basis_quantity ?? ''}:${offer.basis_unit ?? ''}`))
     if (bases.size > 1) missing.push('price_basis')
+  }
+  if (!missing.length && !identityMatched) {
+    const brands = new Set(offers.map(offer => offer.brand?.trim()).filter((value): value is string => Boolean(value)))
+    if (brands.size > 1) missing.push('brand')
+    else {
+      const skus = new Set(offers.map(offer => normalizeCatalogSku(offer.sku)).filter(Boolean))
+      if (skus.size > 1) missing.push('catalogue_item')
+    }
   }
   return missing
 }
@@ -456,6 +559,24 @@ function refinementOptions(query: CatalogQuery, offers: CatalogOfferRow[], missi
         const label = [offer.basis_quantity && offer.basis_quantity !== 1 ? offer.basis_quantity : null, offer.basis_unit, offer.package_type]
           .filter(Boolean).join(' ')
         return label ? { label, value: label, query: `${query.raw} ${label}` } : null
+      }))
+      return options.length > 1 ? [{ facet, options }] : []
+    }
+    if (facet === 'brand') {
+      const options = uniqueRefinementOptions(offers.map((offer) => {
+        const brand = offer.brand?.trim()
+        return brand ? { label: brand, value: brand, query: `${query.raw} ${brand}` } : null
+      }))
+      return options.length > 1 ? [{ facet, options }] : []
+    }
+    if (facet === 'catalogue_item') {
+      const options = uniqueRefinementOptions(offers.map((offer) => {
+        if (!offer.sku) return null
+        return {
+          label: [offer.sku, shortProductName(offer.canonical_name)].filter(Boolean).join(' · '),
+          value: normalizeCatalogSku(offer.sku),
+          query: `SKU ${offer.sku}`
+        }
       }))
       return options.length > 1 ? [{ facet, options }] : []
     }
