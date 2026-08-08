@@ -386,6 +386,14 @@ function scrollToBottom() {
 
 const showAddMenu = ref<string | null>(null) // doc_item_id
 const newQuotationTitle = ref('')
+const reviewConfirmation = ref<{ item: CardItem, quotationId: string | null } | null>(null)
+const confirmingReview = ref(false)
+
+const reviewDestination = computed(() => {
+  const quotationId = reviewConfirmation.value?.quotationId
+  if (!quotationId) return newQuotationTitle.value.trim() || 'New quotation'
+  return quotations.value.find(quotation => quotation.id === quotationId)?.title || 'Selected quotation'
+})
 
 function isQuoteReady(item: Pick<CardItem, 'confidence' | 'needs_review'>) {
   return !item.needs_review && item.confidence >= 0.85
@@ -435,7 +443,7 @@ function quoteQuantity(item: Pick<CardItem, 'requested_quantity'>) {
     : 1
 }
 
-async function addToQuotation(item: CardItem, quotationId: string | null) {
+async function addToQuotation(item: CardItem, quotationId: string | null, reviewConfirmed = false) {
   if (!item.catalog_offer_id && !item.doc_price_item_id && !item.doc_item_id) {
     error.value = 'This price candidate has no source record and cannot be added.'
     return
@@ -444,11 +452,9 @@ async function addToQuotation(item: CardItem, quotationId: string | null) {
     error.value = 'This candidate is below the quotation threshold. Open the source or choose a stronger alternative before adding it.'
     return
   }
-  if (!isQuoteReady(item)) {
-    const confirmed = window.confirm(
-      'This match needs review before it goes into the quotation. Add it anyway?'
-    )
-    if (!confirmed) return
+  if (!isQuoteReady(item) && !reviewConfirmed) {
+    reviewConfirmation.value = { item, quotationId }
+    return
   }
 
   let qid = quotationId
@@ -472,6 +478,39 @@ async function addToQuotation(item: CardItem, quotationId: string | null) {
   showAddMenu.value = null
   // Light toast via console for now
   console.info('Added', item.product_name, 'to quotation', qid)
+}
+
+function closeReviewConfirmation() {
+  if (!confirmingReview.value) reviewConfirmation.value = null
+}
+
+function onReviewConfirmationOpenChange(value: boolean) {
+  if (!value) closeReviewConfirmation()
+}
+
+async function confirmReviewAddition() {
+  const pending = reviewConfirmation.value
+  if (!pending || confirmingReview.value) return
+
+  confirmingReview.value = true
+  try {
+    await addToQuotation(pending.item, pending.quotationId, true)
+    reviewConfirmation.value = null
+    toast.add({
+      title: 'Added to quotation',
+      description: 'The item was added with review confirmation recorded.',
+      icon: 'i-lucide-circle-check'
+    })
+  } catch (err: any) {
+    toast.add({
+      title: 'Could not add item',
+      description: err?.data?.statusMessage || err?.message || 'Please try again.',
+      color: 'error',
+      icon: 'i-lucide-circle-alert'
+    })
+  } finally {
+    confirmingReview.value = false
+  }
 }
 
 async function addAlternativeToQuotation(base: CardItem, alternative: CandidateAlternative, quotationId: string | null) {
@@ -1095,6 +1134,88 @@ async function onDocumentsUploaded() {
         </div>
       </form>
     </footer>
+
+    <UModal
+      :open="Boolean(reviewConfirmation)"
+      title="Add review-required match?"
+      description="This result is not quote-ready yet. Confirm that you want to add it for manual review."
+      :dismissible="!confirmingReview"
+      :ui="{
+        overlay: 'bg-gray-950/60 backdrop-blur-[2px]',
+        content: 'sm:max-w-lg',
+        header: 'p-5 sm:p-6',
+        title: 'text-lg font-semibold tracking-tight',
+        description: 'mt-1.5 text-sm leading-6 text-muted',
+        close: 'size-11 rounded-lg',
+        body: 'px-5 pb-5 sm:px-6 sm:pb-6',
+        footer: 'flex-col-reverse items-stretch gap-2 border-t border-default px-5 py-4 sm:flex-row sm:justify-end sm:px-6'
+      }"
+      @update:open="onReviewConfirmationOpenChange"
+    >
+      <template v-if="reviewConfirmation" #body>
+        <div class="rounded-xl border border-warning/30 bg-warning/10 p-4">
+          <div class="flex items-start gap-3">
+            <span class="grid size-10 shrink-0 place-items-center rounded-lg bg-warning/15 text-warning">
+              <UIcon name="i-lucide-triangle-alert" class="size-5" aria-hidden="true" />
+            </span>
+            <div class="min-w-0">
+              <p class="font-semibold text-highlighted">Manual review required</p>
+              <p class="mt-1 text-sm leading-6 text-muted">
+                Check the cited source before sending this quotation to a customer.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <dl class="mt-4 grid grid-cols-[92px_1fr] gap-x-3 gap-y-2 rounded-xl border border-default bg-muted/35 p-4 text-sm">
+          <dt class="text-muted">Product</dt>
+          <dd class="min-w-0 break-words font-medium text-highlighted">{{ reviewConfirmation.item.product_name }}</dd>
+          <dt class="text-muted">Price</dt>
+          <dd class="font-semibold tabular-nums text-highlighted">
+            {{ formatMoney(reviewConfirmation.item.price, reviewConfirmation.item.currency) }}
+            <span class="font-normal text-muted">
+              {{ sourceRateBasis(reviewConfirmation.item) ? `/ ${sourceRateBasis(reviewConfirmation.item)}` : '' }}
+            </span>
+          </dd>
+          <dt class="text-muted">Source</dt>
+          <dd class="min-w-0 break-words text-highlighted">{{ sourceLabel(reviewConfirmation.item) }}</dd>
+          <dt class="text-muted">Destination</dt>
+          <dd class="min-w-0 break-words text-highlighted">{{ reviewDestination }}</dd>
+        </dl>
+
+        <NuxtLink
+          v-if="sourceHref(reviewConfirmation.item)"
+          :to="sourceHref(reviewConfirmation.item)!"
+          class="mt-3 inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm font-medium text-primary transition hover:bg-primary/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          @click="closeReviewConfirmation"
+        >
+          <UIcon name="i-lucide-external-link" aria-hidden="true" />
+          Open cited source first
+        </NuxtLink>
+      </template>
+
+      <template #footer>
+        <UButton
+          label="Cancel"
+          color="neutral"
+          variant="soft"
+          size="md"
+          class="min-h-11 justify-center rounded-lg px-5"
+          :disabled="confirmingReview"
+          @click="closeReviewConfirmation"
+        />
+        <UButton
+          label="Add for review"
+          icon="i-lucide-plus"
+          color="warning"
+          size="md"
+          class="min-h-11 justify-center rounded-lg px-5"
+          :loading="confirmingReview"
+          :disabled="confirmingReview"
+          @click="confirmReviewAddition"
+        />
+      </template>
+    </UModal>
 
     <LazyDocumentUploadModal v-model:open="uploadOpen" @uploaded="onDocumentsUploaded" />
   </div>
