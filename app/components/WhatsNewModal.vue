@@ -4,7 +4,7 @@ const props = defineProps<{
 }>()
 
 const RELEASE_ID = 'catalogue-search-v3-2026-08-08'
-const ACTIVE_UNTIL = Date.parse('2026-09-08T23:59:59+05:30')
+const ACTIVE_UNTIL = Date.parse('2026-08-18T00:00:00+05:30')
 const open = ref(false)
 
 const updates = [
@@ -30,8 +30,15 @@ const updates = [
   }
 ]
 
-function releaseStorageKey() {
-  return `ratefinder:release-seen:${RELEASE_ID}:${props.userId ?? 'anonymous'}`
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function releaseStorageKey(date = new Date()) {
+  return `ratefinder:release-seen:${RELEASE_ID}:${props.userId ?? 'anonymous'}:${localDateKey(date)}`
 }
 
 function showIfEligible() {
@@ -102,7 +109,7 @@ onMounted(showIfEligible)
 
     <template #footer>
       <p class="text-center text-xs leading-5 text-muted sm:text-left">
-        This announcement is shown once for this release.
+        Shown on your first app visit each day through 17 August 2026.
       </p>
       <UButton
         label="Got it"
