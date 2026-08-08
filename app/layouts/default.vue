@@ -310,5 +310,7 @@ const navItems = [
     <main class="flex h-full min-w-0 flex-col overflow-hidden">
       <slot />
     </main>
+
+    <WhatsNewModal :user-id="user?.id" />
   </div>
 </template>
