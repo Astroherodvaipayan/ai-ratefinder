@@ -2,18 +2,26 @@ import type { CatalogOfferRow, CatalogSearchResult } from './searchV2'
 
 export function catalogChatResponse(results: CatalogSearchResult[]) {
   const lines = results.map((result) => {
+    const correction = result.query.corrected_text
+      ? ` Interpreted as “${result.query.corrected_text}”.`
+      : ''
     if (result.state === 'absent') {
-      return `• ${result.query.raw}: no published offer matches every specified detail. No substitute was used.`
+      const alternatives = result.suggestions.filter(suggestion => suggestion.reason === 'closest').length
+      return `• ${result.query.raw}: no published offer matches every specified detail. No substitute was used.${alternatives ? ` ${alternatives} catalogue-backed suggestion${alternatives === 1 ? '' : 's'} available below.` : ''}${correction}`
     }
     if (result.state === 'ambiguous') {
-      return `• ${result.query.raw}: needs ${result.missing_facets.join(', ')} before a unique product can be selected.`
+      return `• ${result.query.raw}: choose ${result.missing_facets.map(prettyFacet).join(', ')} to narrow ${result.offers.length} matching offer${result.offers.length === 1 ? '' : 's'}.${correction}`
     }
-    return `• ${result.query.raw}: found ${result.offers.length} source-backed offer${result.offers.length === 1 ? '' : 's'}.`
+    const method = result.match_method === 'sku' ? ' by exact SKU' : ''
+    return `• ${result.query.raw}: found ${result.offers.length} source-backed offer${result.offers.length === 1 ? '' : 's'}${method}.${correction}`
   })
 
   return {
     answerText: lines.join('\n'),
-    items: results.flatMap(result => result.offers.map(offer => chatItem(result, offer)))
+    items: results.flatMap(result => [
+      ...(needsSearchNotice(result) ? [searchNotice(result)] : []),
+      ...result.offers.map(offer => chatItem(result, offer))
+    ])
   }
 }
 
@@ -28,6 +36,11 @@ function chatItem(result: CatalogSearchResult, offer: CatalogOfferRow) {
   const requiresChoice = result.state !== 'exact' || result.offers.length > 1
 
   return {
+    kind: 'offer',
+    requested_query: result.query.raw,
+    match_state: result.state,
+    match_method: result.match_method,
+    understood_facets: result.query.facets,
     catalog_offer_id: offer.id,
     doc_price_item_id: null,
     doc_item_id: null,
@@ -64,6 +77,56 @@ function chatItem(result: CatalogSearchResult, offer: CatalogOfferRow) {
   }
 }
 
+function needsSearchNotice(result: CatalogSearchResult) {
+  return Boolean(
+    result.query.corrected_text
+    || result.state !== 'exact'
+    || result.suggestions.length
+    || result.refinements.length
+  )
+}
+
+function searchNotice(result: CatalogSearchResult) {
+  return {
+    kind: 'search_notice',
+    requested_query: result.query.raw,
+    corrected_query: result.query.corrected_text,
+    match_state: result.state,
+    match_method: result.match_method,
+    understood_facets: result.query.facets,
+    missing_facets: result.missing_facets,
+    suggestions: result.suggestions,
+    refinements: result.refinements,
+    catalog_offer_id: null,
+    doc_price_item_id: null,
+    doc_item_id: null,
+    product_name: result.state === 'absent'
+      ? 'No exact catalogue match'
+      : result.state === 'ambiguous'
+        ? 'Choose a specification'
+        : 'Search wording corrected',
+    sku: null,
+    unit: null,
+    price: null,
+    moq: null,
+    currency: 'INR',
+    vendor: '',
+    source_document: '',
+    source_page: null,
+    confidence: 0,
+    needs_review: false,
+    matched_table: null,
+    matched_row: null,
+    matched_column: null,
+    match_explanation: result.explanation,
+    suggested_query: result.query.corrected_text,
+    variant_label: null,
+    price_basis: null,
+    requested_quantity: null,
+    alternatives: []
+  }
+}
+
 function displayName(offer: CatalogOfferRow) {
   const facets = offer.facets
   const parts = [
@@ -87,4 +150,8 @@ function facetLabel(offer: CatalogOfferRow) {
     .filter(([name]) => name !== 'price_basis_inferred')
     .map(([name, value]) => `${name.replace(/_/g, ' ')}: ${value}`)
     .join(' · ')
+}
+
+function prettyFacet(value: string) {
+  return value.replace(/_/g, ' ')
 }

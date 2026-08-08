@@ -6,6 +6,15 @@ const id = computed(() => route.params.id as string)
 const user = useSupabaseUser()
 
 interface CardItem {
+  kind?: 'offer' | 'search_notice'
+  requested_query?: string
+  corrected_query?: string | null
+  match_state?: 'exact' | 'ambiguous' | 'absent'
+  match_method?: 'sku' | 'facets' | 'none'
+  understood_facets?: Record<string, string | number | boolean>
+  missing_facets?: string[]
+  suggestions?: SearchSuggestion[]
+  refinements?: SearchRefinement[]
   catalog_offer_id?: string | null
   doc_item_id: string | null
   doc_price_item_id?: string | null
@@ -29,6 +38,26 @@ interface CardItem {
   price_basis?: PriceBasis | null
   requested_quantity?: RequestedQuantity | null
   alternatives?: CandidateAlternative[]
+}
+interface SearchSuggestion {
+  label: string
+  query: string
+  reason: 'sku' | 'spelling' | 'closest' | 'refinement'
+  sku?: string | null
+}
+interface SearchRefinement {
+  facet: string
+  options: Array<{ label: string, value: string | number | boolean, query: string }>
+}
+interface ComposerSuggestion {
+  id: string
+  label: string
+  query: string
+  sku: string | null
+  brand: string | null
+  category: string
+  amount: number
+  basis: string | null
 }
 interface PriceBasis {
   source_price: number
@@ -98,6 +127,9 @@ const toast = useToast()
 
 const input = ref('')
 const sending = ref(false)
+const composerSuggestions = ref<ComposerSuggestion[]>([])
+const suggestionsLoading = ref(false)
+const activeSuggestionIndex = ref(-1)
 const error = ref<string | null>(null)
 const scroller = ref<HTMLElement | null>(null)
 const composer = ref<HTMLTextAreaElement | null>(null)
@@ -210,6 +242,8 @@ async function send() {
   const content = input.value.trim()
   if (!content || sending.value) return
   sending.value = true
+  composerSuggestions.value = []
+  activeSuggestionIndex.value = -1
   error.value = null
   // Optimistic user message
   const optimisticId = 'tmp-' + Date.now()
@@ -250,9 +284,100 @@ async function send() {
 }
 
 function onComposerKeydown(event: KeyboardEvent) {
+  if (composerSuggestions.value.length) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      activeSuggestionIndex.value = (activeSuggestionIndex.value + 1) % composerSuggestions.value.length
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      activeSuggestionIndex.value = activeSuggestionIndex.value <= 0
+        ? composerSuggestions.value.length - 1
+        : activeSuggestionIndex.value - 1
+      return
+    }
+    if (event.key === 'Escape') {
+      composerSuggestions.value = []
+      activeSuggestionIndex.value = -1
+      return
+    }
+    if (event.key === 'Enter' && activeSuggestionIndex.value >= 0) {
+      event.preventDefault()
+      void chooseComposerSuggestion(composerSuggestions.value[activeSuggestionIndex.value]!)
+      return
+    }
+  }
   if (event.key !== 'Enter' || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return
   event.preventDefault()
   send()
+}
+
+let suggestionTimer: ReturnType<typeof setTimeout> | null = null
+let suggestionRequest = 0
+watch(input, (value) => {
+  if (suggestionTimer) clearTimeout(suggestionTimer)
+  const query = value.trim()
+  if (sending.value || query.length < 2) {
+    composerSuggestions.value = []
+    activeSuggestionIndex.value = -1
+    return
+  }
+  const request = ++suggestionRequest
+  suggestionTimer = setTimeout(async () => {
+    suggestionsLoading.value = true
+    try {
+      const response = await $fetch<{ suggestions: ComposerSuggestion[] }>('/api/catalog/suggestions', {
+        query: {
+          q: query,
+          vendor_id: selectedVendorId.value || undefined,
+          document_id: selectedDocumentId.value || undefined
+        }
+      })
+      if (request !== suggestionRequest) return
+      composerSuggestions.value = response.suggestions
+      activeSuggestionIndex.value = -1
+    } catch {
+      if (request === suggestionRequest) composerSuggestions.value = []
+    } finally {
+      if (request === suggestionRequest) suggestionsLoading.value = false
+    }
+  }, 220)
+})
+
+async function chooseComposerSuggestion(suggestion: ComposerSuggestion) {
+  input.value = suggestion.query
+  composerSuggestions.value = []
+  activeSuggestionIndex.value = -1
+  await nextTick()
+  await send()
+}
+
+async function submitSearchQuery(query: string) {
+  input.value = query
+  await nextTick()
+  await send()
+}
+
+function prettyFacet(value: string) {
+  return value.replace(/_/g, ' ')
+}
+
+function facetChip(name: string, value: string | number | boolean) {
+  if (name === 'current_a') return `${value}A`
+  if (name === 'size_sqmm') return `${value} sqmm`
+  if (name === 'cores') return `${value} core`
+  if (name === 'poles') return `${value} pole`
+  if (name === 'pairs') return `${value} pair`
+  if (name === 'modules') return `${value} module`
+  if (name === 'ways') return `${value} way`
+  if (name === 'breaking_capacity_ka') return `${value}kA`
+  if (name === 'curve') return `${value} curve`
+  return String(value)
+}
+
+function noticeSuggestions(item: CardItem) {
+  return (item.suggestions ?? []).filter(suggestion => suggestion.reason !== 'spelling')
 }
 
 function scrollToBottom() {
@@ -449,6 +574,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   if (promptTimer) clearInterval(promptTimer)
+  if (suggestionTimer) clearTimeout(suggestionTimer)
 })
 watch(messages, () => nextTick(scrollToBottom))
 
@@ -531,9 +657,90 @@ async function onDocumentsUploaded() {
           </div>
 
           <div v-if="m.items?.length" class="ml-0 grid grid-cols-1 gap-3 sm:ml-11 lg:grid-cols-2">
-            <article
+            <template
               v-for="it in m.items"
-              :key="it.doc_price_item_id || it.doc_item_id || it.product_name"
+              :key="it.catalog_offer_id || it.doc_price_item_id || it.doc_item_id || `${it.kind}-${it.requested_query}-${it.product_name}`"
+            >
+              <aside
+                v-if="it.kind === 'search_notice'"
+                class="rounded-xl border border-primary/25 bg-primary/5 p-4 text-sm lg:col-span-2"
+                :aria-label="it.product_name"
+              >
+                <div class="flex items-start gap-3">
+                  <span class="grid size-9 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
+                    <UIcon :name="it.match_state === 'absent' ? 'i-lucide-search-x' : 'i-lucide-list-filter'" />
+                  </span>
+                  <div class="min-w-0 flex-1">
+                    <h3 class="font-semibold text-highlighted">{{ it.product_name }}</h3>
+                    <p v-if="it.match_explanation" class="mt-1 leading-5 text-muted">
+                      {{ it.match_explanation }}
+                    </p>
+
+                    <div v-if="Object.keys(it.understood_facets ?? {}).length" class="mt-3">
+                      <p class="text-xs font-medium text-toned">Understood</p>
+                      <div class="mt-2 flex flex-wrap gap-2">
+                        <UBadge
+                          v-for="(value, name) in it.understood_facets"
+                          :key="name"
+                          color="primary"
+                          variant="subtle"
+                          size="sm"
+                        >
+                          {{ facetChip(String(name), value) }}
+                        </UBadge>
+                      </div>
+                    </div>
+
+                    <p v-if="it.corrected_query" class="mt-3 text-xs text-toned">
+                      Showing corrected wording:
+                      <button
+                        type="button"
+                        class="min-h-11 rounded-md px-2 font-semibold text-primary underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                        @click="submitSearchQuery(it.corrected_query!)"
+                      >
+                        {{ it.corrected_query }}
+                      </button>
+                    </p>
+
+                    <div v-for="refinement in it.refinements ?? []" :key="refinement.facet" class="mt-3">
+                      <p class="text-xs font-medium capitalize text-toned">
+                        Choose {{ prettyFacet(refinement.facet) }}
+                      </p>
+                      <div class="mt-2 flex flex-wrap gap-2">
+                        <UButton
+                          v-for="option in refinement.options"
+                          :key="`${refinement.facet}-${option.value}`"
+                          type="button"
+                          size="sm"
+                          variant="soft"
+                          color="primary"
+                          class="min-h-11"
+                          @click="submitSearchQuery(option.query)"
+                        >
+                          {{ option.label }}
+                        </UButton>
+                      </div>
+                    </div>
+
+                    <div v-if="noticeSuggestions(it).length" class="mt-3">
+                      <p class="text-xs font-medium text-toned">Did you mean</p>
+                      <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                        <button
+                          v-for="suggestion in noticeSuggestions(it)"
+                          :key="suggestion.query"
+                          type="button"
+                          class="min-h-11 rounded-lg border border-default bg-default px-3 py-2 text-left text-xs leading-5 text-highlighted transition hover:border-primary/50 hover:bg-primary/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                          @click="submitSearchQuery(suggestion.query)"
+                        >
+                          {{ suggestion.label }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </aside>
+            <article
+              v-else
               class="rounded-xl border border-default/70 bg-default/95 p-4 text-sm shadow-sm"
             >
               <div class="flex items-start justify-between gap-3">
@@ -739,6 +946,7 @@ async function onDocumentsUploaded() {
                 </NuxtLink>
               </div>
             </article>
+            </template>
           </div>
 
           <div
@@ -780,7 +988,41 @@ async function onDocumentsUploaded() {
           {{ error }}
         </p>
 
-        <div class="rounded-[28px] border border-default bg-default p-2 shadow-md ring-1 ring-inset ring-default/60">
+        <div class="relative rounded-[28px] border border-default bg-default p-2 shadow-md ring-1 ring-inset ring-default/60">
+          <div
+            v-if="composerSuggestions.length || suggestionsLoading"
+            id="catalog-search-suggestions"
+            role="listbox"
+            aria-label="Catalogue suggestions"
+            class="absolute inset-x-0 bottom-full z-30 mb-3 max-h-[min(420px,55vh)] overflow-y-auto rounded-2xl border border-default bg-default p-2 shadow-xl ring-1 ring-default/60"
+          >
+            <div v-if="suggestionsLoading && !composerSuggestions.length" class="flex min-h-12 items-center gap-2 px-3 text-sm text-muted">
+              <UIcon name="i-lucide-loader-2" class="animate-spin" />
+              Finding catalogue codes and products…
+            </div>
+            <button
+              v-for="(suggestion, index) in composerSuggestions"
+              :id="`catalog-suggestion-${index}`"
+              :key="suggestion.id"
+              type="button"
+              role="option"
+              :aria-selected="activeSuggestionIndex === index"
+              class="flex min-h-12 w-full items-start justify-between gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary"
+              :class="activeSuggestionIndex === index ? 'bg-primary/10' : ''"
+              @mousedown.prevent
+              @click="chooseComposerSuggestion(suggestion)"
+            >
+              <span class="min-w-0">
+                <span class="block truncate text-sm font-medium text-highlighted">{{ suggestion.label }}</span>
+                <span class="mt-0.5 block text-xs capitalize text-muted">{{ prettyFacet(suggestion.category) }}</span>
+              </span>
+              <span class="shrink-0 text-right">
+                <span class="block text-sm font-semibold tabular-nums text-highlighted">{{ formatMoney(suggestion.amount) }}</span>
+                <span v-if="suggestion.basis" class="block text-xs text-muted">/ {{ suggestion.basis }}</span>
+              </span>
+            </button>
+          </div>
+
           <div class="flex flex-wrap items-center gap-2 px-1 pb-2 sm:px-2">
             <UButton
               type="button"
@@ -834,6 +1076,11 @@ async function onDocumentsUploaded() {
               class="max-h-36 min-h-12 flex-1 resize-none bg-transparent px-3 py-3 text-sm leading-6 outline-none placeholder:text-muted"
               placeholder="Ask for rates, compare vendors, or build a proforma…"
               :disabled="sending"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-controls="catalog-search-suggestions"
+              :aria-expanded="Boolean(composerSuggestions.length || suggestionsLoading)"
+              :aria-activedescendant="activeSuggestionIndex >= 0 ? `catalog-suggestion-${activeSuggestionIndex}` : undefined"
               @keydown="onComposerKeydown"
             />
             <UButton

@@ -2,11 +2,21 @@ import type { CatalogCategory, CatalogFacets } from './contracts'
 
 export interface CatalogQuery {
   raw: string
+  normalized_text: string
+  corrected_text: string | null
+  corrections: CatalogQueryCorrection[]
+  sku_candidates: string[]
   category: CatalogCategory | null
   facets: CatalogFacets
   requested_basis_quantity: number | null
   requested_basis_unit: string | null
   terms: string[]
+}
+
+export interface CatalogQueryCorrection {
+  from: string
+  to: string
+  kind: 'spelling' | 'alias'
 }
 
 export function splitCatalogQueries(message: string) {
@@ -19,7 +29,9 @@ export function parseCatalogQuery(raw: string): CatalogQuery {
   const facets: CatalogFacets = {}
 
   const setNumber = (name: string, re: RegExp) => {
-    const match = text.match(re)
+    const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`
+    const matches = [...text.matchAll(new RegExp(re.source, flags))]
+    const match = matches.at(-1)
     if (match?.[1]) facets[name] = Number(match[1])
   }
 
@@ -51,22 +63,41 @@ export function parseCatalogQuery(raw: string): CatalogQuery {
     setNumber('modules', /\b(\d+(?:\.\d+)?)\s*m\b/)
   }
   setNumber('pins', /\b(\d+(?:\.\d+)?)\s*pin\b/)
+  if (category === 'power_cable' && (facets.size_sqmm === undefined || facets.cores === undefined)) {
+    const matrixIdentity = [...text.matchAll(/\b([1-9])\s*x\s*(\d+(?:\.\d+)?)\b/g)].at(-1)
+    if (matrixIdentity) {
+      if (facets.cores === undefined) facets.cores = Number(matrixIdentity[1])
+      if (facets.size_sqmm === undefined) facets.size_sqmm = Number(matrixIdentity[2])
+    }
+  }
   if (/\bcombi(?:ned)?\b|\bcombine(?:d)?\s+box\b/.test(text)) facets.combined = true
   const currentRange = text.match(/\b(\d+)\s*(?:amp|a)?\s*\/\s*(\d+)\s*(?:amp|a)?\b/)
-  if (currentRange) facets.current_range = `${currentRange[1]}/${currentRange[2]}A`
+  if (currentRange && ['socket', 'accessory'].includes(category ?? '')) {
+    facets.current_range = `${currentRange[1]}/${currentRange[2]}A`
+  }
   if (/\btpn\b/.test(text)) facets.board_type = 'TPN'
   else if (/\bspn\b/.test(text)) facets.board_type = 'SPN'
   if (category === 'junction_box') setNumber('size_mm', /\b(\d+(?:\.\d+)?)\s*mm\b/)
   if (category === 'telephone_cable') setNumber('conductor_size_mm', /\b(\d+(?:\.\d+)?)\s*mm\b/)
 
-  const voltage = text.match(/\b(\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?\s*kv|\d+(?:\.\d+)?\s*kv|650\s*\/\s*1100\s*v)\b/)
+  const voltageSegment = normalizeQuery(raw.split(/[—–]/).at(-1) ?? raw)
+  const segmentVoltages = [...voltageSegment.matchAll(/\b(\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?\s*kv|\d+(?:\.\d+)?\s*kv|650\s*\/\s*1100\s*v)\b/g)]
+  const allVoltages = segmentVoltages.length
+    ? segmentVoltages
+    : [...text.matchAll(/\b(\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?\s*kv|\d+(?:\.\d+)?\s*kv|650\s*\/\s*1100\s*v)\b/g)]
+  const voltage = /\bue\b/.test(voltageSegment) ? allVoltages[0] : allVoltages.at(-1)
   if (voltage?.[1]) facets.voltage_grade = normalizeVoltageGrade(voltage[1])
   const curve = text.match(/\b([bcd])\s*curve\b/)
   if (curve?.[1]) facets.curve = curve[1].toUpperCase()
 
   const requestedBasis = requestedBasisFromQuery(text)
+  const corrections = queryCorrections(raw)
   return {
     raw,
+    normalized_text: text,
+    corrected_text: corrections.length ? applySafeCorrections(raw) : null,
+    corrections,
+    sku_candidates: extractSkuCandidates(raw),
     category,
     facets,
     requested_basis_quantity: requestedBasis.quantity,
@@ -82,6 +113,8 @@ function normalizeQuery(value: string) {
     .replace(/(\d+(?:\.\d+)?)\s*(?:cores?|core|c)\b/g, '$1 core ')
     .replace(/(\d+(?:\.\d+)?)\s*(?:poles?|pole|p)\b/g, '$1 pole ')
     .replace(/\bcabels?\b/g, ' cable ')
+    .replace(/\bflx\b/g, ' flexible ')
+    .replace(/\b(\d+)\s*p\s*oles?\b/g, '$1 pole ')
     .replace(/(\d+(?:\.\d+)?)\s*model\s*box\b/g, '$1 module box ')
     .replace(/\bcu\b/g, ' copper ')
     .replace(/\b(?:alu|aluminium|aluminum)\b/g, ' aluminium ')
@@ -95,6 +128,10 @@ function normalizeQuery(value: string) {
     .replace(/\bdp\b/g, ' 2 pole ')
     .replace(/\btp\b/g, ' 3 pole ')
     .replace(/\bfp\b/g, ' 4 pole ')
+    .replace(/\bsingle\s+poles?\b/g, ' 1 pole ')
+    .replace(/\bdouble\s+poles?\b/g, ' 2 pole ')
+    .replace(/\b(?:triple|three)\s+poles?\b/g, ' 3 pole ')
+    .replace(/\bfour\s+poles?\b/g, ' 4 pole ')
     .replace(/(\d+(?:\.\d+)?)\s*(?:amps?|amperes?|a)\b/g, '$1 amp ')
     .replace(/(\d+(?:\.\d+)?)\s*(?:cores?|core|c)\b/g, '$1 core ')
     .replace(/(\d+(?:\.\d+)?)\s*(?:poles?|pole)\b/g, '$1 pole ')
@@ -105,6 +142,7 @@ function normalizeQuery(value: string) {
 }
 
 function inferQueryCategory(text: string): CatalogCategory | null {
+  if (/\b(?:\d+\s*way\s+)?mcb\s+(?:box|db|enclosure)\b/.test(text)) return 'distribution_board'
   if (/\bmccb\b/.test(text)) return 'mccb'
   if (/\brcbo\b/.test(text)) return 'rcbo'
   if (/\brccb\b/.test(text)) return 'rccb'
@@ -129,7 +167,60 @@ function inferQueryCategory(text: string): CatalogCategory | null {
 
 function normalizeVoltageGrade(value: string) {
   const compact = value.replace(/\s+/g, '').toUpperCase()
-  return compact === '650/1100V' || compact === '1.1KV' ? '1.1KV' : compact
+  if (compact === '650/1100V' || compact === '1.1KV') return '1.1KV'
+  const ratio = compact.match(/^\d+(?:\.\d+)?\/(\d+(?:\.\d+)?)KV$/)
+  return ratio?.[1] ? `${ratio[1]}KV` : compact
+}
+
+export function normalizeCatalogSku(value: string | null | undefined) {
+  return String(value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+function extractSkuCandidates(raw: string) {
+  const candidates = new Set<string>()
+  const add = (value: string | undefined) => {
+    const normalized = normalizeCatalogSku(value)
+    if (normalized.length >= 3) candidates.add(normalized)
+  }
+  for (const match of raw.matchAll(/\b(?:sku|item\s*code|product\s*code|cat(?:alogue)?\s*(?:no|number)?|model)\s*[:#-]?\s*([a-z0-9][a-z0-9 ./_-]{2,30})/gi)) {
+    add(match[1]?.trim().split(/\s+(?:price|rate|mrp)\b/i)[0])
+  }
+  const trimmed = raw.trim()
+  const looksLikeStandaloneCode = /^[a-z0-9][a-z0-9 ./_-]{2,30}$/i.test(trimmed)
+    && (/\d/.test(trimmed) && /[a-z]/i.test(trimmed) || /^\d{4,}$/.test(trimmed))
+    && !/\b(?:amp|core|pole|sqmm|sq\.?\s*mm|meter|mtr|module|way|kv|cable|wire|box|mcb|socket|switch)\b/i.test(trimmed)
+  if (looksLikeStandaloneCode) add(trimmed)
+  for (const token of raw.match(/[a-z0-9][a-z0-9._/-]*/gi) ?? []) {
+    if (!/\d/.test(token) || !/[a-z]/i.test(token)) continue
+    if (/^\d+(?:\.\d+)?(?:a|amp|c|core|p|pole|m|mm|sqmm|kv|ka)$/i.test(token)) continue
+    if (token.length >= 5) add(token)
+  }
+  return [...candidates]
+}
+
+function queryCorrections(raw: string): CatalogQueryCorrection[] {
+  const corrections: CatalogQueryCorrection[] = []
+  const add = (re: RegExp, to: string, kind: CatalogQueryCorrection['kind']) => {
+    const match = raw.match(re)
+    if (match?.[0]) corrections.push({ from: match[0], to, kind })
+  }
+  add(/\bcabels?\b/i, 'cable', 'spelling')
+  add(/\bflx\b/i, 'flexible', 'alias')
+  add(/\b(?:alu|aluminum)\b/i, 'aluminium', 'alias')
+  add(/\b(\d+)\s*model\s*box\b/i, `${raw.match(/\b(\d+)\s*model\s*box\b/i)?.[1] ?? ''} module box`.trim(), 'spelling')
+  add(/\b(\d+)\s*p\s*oles?\b/i, `${raw.match(/\b(\d+)\s*p\s*oles?\b/i)?.[1] ?? ''} pole`.trim(), 'spelling')
+  return corrections
+}
+
+function applySafeCorrections(raw: string) {
+  return raw
+    .replace(/\bcabels?\b/gi, 'cable')
+    .replace(/\bflx\b/gi, 'Flexible')
+    .replace(/\b(?:alu|aluminum)\b/gi, 'Aluminium')
+    .replace(/\b(\d+)\s*model\s*box\b/gi, '$1 Module Box')
+    .replace(/\b(\d+)\s*p\s*oles?\b/gi, '$1 Pole')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 function requestedBasisFromQuery(text: string) {
