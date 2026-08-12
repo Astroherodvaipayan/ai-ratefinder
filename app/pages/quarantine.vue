@@ -71,7 +71,14 @@ const data = ref<CatalogueResponse | null>(null)
 const pending = ref(true)
 const loadError = ref<string | null>(null)
 const exporting = ref(false)
+const metadataPending = reactive<Record<OfferStatus, boolean>>({ published: false, quarantined: false })
+const metadataByStatus = reactive<Record<OfferStatus, Pick<CatalogueResponse['summary'], 'reason_counts' | 'category_counts'> | null>>({
+  published: null,
+  quarantined: null
+})
+const metadataLoads: Partial<Record<OfferStatus, Promise<void>>> = {}
 let filterTimer: ReturnType<typeof setTimeout> | null = null
+let loadSequence = 0
 
 const isPublished = computed(() => status.value === 'published')
 const firstVisible = computed(() => {
@@ -85,9 +92,10 @@ const lastVisible = computed(() => {
     data.value.pagination.page * data.value.pagination.page_size
   )
 })
+const productGroups = computed(() => groupCatalogueRows(data.value?.rows ?? []))
 
-function humanize(value: string) {
-  return value.replace(/^missing_required_facet:/, 'Missing ').replaceAll('_', ' ')
+function groupValidationErrors(offers: CatalogueRow[]) {
+  return [...new Set(offers.flatMap(offer => offer.validation_errors))]
 }
 
 function formatCurrency(amount: number) {
@@ -113,13 +121,40 @@ function presented(row: CatalogueRow) {
   return value
 }
 
+async function loadMetadata(targetStatus: OfferStatus) {
+  if (metadataByStatus[targetStatus]) return
+  if (metadataLoads[targetStatus]) return metadataLoads[targetStatus]
+  metadataPending[targetStatus] = true
+  metadataLoads[targetStatus] = (async () => {
+    try {
+      const response = await $fetch<CatalogueResponse>('/api/catalog/quarantine', {
+        query: { status: targetStatus, metadata_only: true }
+      })
+      const metadata = {
+        reason_counts: response.summary.reason_counts,
+        category_counts: response.summary.category_counts
+      }
+      metadataByStatus[targetStatus] = metadata
+      if (data.value?.status === targetStatus) Object.assign(data.value.summary, metadata)
+    } catch {
+      // The product list is still usable if optional filter counts fail.
+    } finally {
+      metadataPending[targetStatus] = false
+      delete metadataLoads[targetStatus]
+    }
+  })()
+  return metadataLoads[targetStatus]
+}
+
 async function load() {
+  const sequence = ++loadSequence
+  const requestedStatus = status.value
   pending.value = true
   loadError.value = null
   try {
-    data.value = await $fetch<CatalogueResponse>('/api/catalog/quarantine', {
+    const response = await $fetch<CatalogueResponse>('/api/catalog/quarantine', {
       query: {
-        status: status.value,
+        status: requestedStatus,
         page: page.value,
         page_size: 50,
         search: search.value || undefined,
@@ -127,11 +162,17 @@ async function load() {
         category: category.value || undefined
       }
     })
+    if (sequence !== loadSequence) return
+    const metadata = metadataByStatus[requestedStatus]
+    if (metadata) Object.assign(response.summary, metadata)
+    data.value = response
     page.value = data.value.pagination.page
+    void loadMetadata(requestedStatus)
   } catch (err: any) {
+    if (sequence !== loadSequence) return
     loadError.value = err?.statusMessage || err?.message || 'Could not load catalogue offers.'
   } finally {
-    pending.value = false
+    if (sequence === loadSequence) pending.value = false
   }
 }
 
@@ -305,10 +346,11 @@ onBeforeUnmount(() => {
                 id="catalogue-reason"
                 v-model="reason"
                 class="min-h-11 w-full rounded-lg border border-default bg-default px-3 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                :disabled="metadataPending[status] && !(data?.summary.reason_counts.length)"
               >
-                <option value="">All reasons</option>
+                <option value="">{{ metadataPending[status] ? 'Loading reasons…' : 'All reasons' }}</option>
                 <option v-for="option in data?.summary.reason_counts ?? []" :key="option.value" :value="option.value">
-                  {{ humanize(option.value) }} ({{ option.count }})
+                  {{ quarantineReasonLabel(option.value) }} ({{ option.count.toLocaleString('en-IN') }})
                 </option>
               </select>
             </div>
@@ -317,11 +359,12 @@ onBeforeUnmount(() => {
               <select
                 id="catalogue-category"
                 v-model="category"
-                class="min-h-11 w-full rounded-lg border border-default bg-default px-3 text-sm capitalize focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                class="min-h-11 w-full rounded-lg border border-default bg-default px-3 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                :disabled="metadataPending[status] && !(data?.summary.category_counts.length)"
               >
-                <option value="">All categories</option>
+                <option value="">{{ metadataPending[status] ? 'Loading categories…' : 'All product categories' }}</option>
                 <option v-for="option in data?.summary.category_counts ?? []" :key="option.value" :value="option.value">
-                  {{ humanize(option.value) }} ({{ option.count }})
+                  {{ catalogueCategoryFilterLabel(option.value) }} ({{ option.count.toLocaleString('en-IN') }})
                 </option>
               </select>
             </div>
@@ -350,7 +393,8 @@ onBeforeUnmount(() => {
             <p class="text-muted" aria-live="polite">
               <template v-if="pending">Loading {{ status }} catalogue offers…</template>
               <template v-else-if="data?.summary.filtered_total">
-                Showing <span class="font-medium text-highlighted">{{ firstVisible }}–{{ lastVisible }}</span>
+                Showing <span class="font-medium text-highlighted">{{ productGroups.length }} products</span>
+                from price records <span class="font-medium text-highlighted">{{ firstVisible }}–{{ lastVisible }}</span>
                 of <span class="font-medium text-highlighted">{{ data.summary.filtered_total.toLocaleString('en-IN') }}</span>
               </template>
               <template v-else>No matching {{ status }} items</template>
@@ -363,12 +407,15 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else-if="data?.rows.length" class="divide-y divide-default">
-            <details v-for="row in data.rows" :key="row.id" class="group open:bg-muted/30">
-              <summary class="grid cursor-pointer list-none gap-3 px-4 py-4 transition hover:bg-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary lg:grid-cols-[minmax(260px,1.2fr)_minmax(210px,0.8fr)_minmax(130px,0.45fr)_minmax(250px,0.9fr)_24px] lg:items-center">
+            <details v-for="{ key, primary: row, offers } in productGroups" :key="key" class="group open:bg-muted/30">
+              <summary class="grid cursor-pointer list-none gap-4 px-4 py-4 transition hover:bg-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.48fr)_24px] lg:items-center">
                 <div class="min-w-0">
                   <div class="flex flex-wrap items-center gap-2">
                     <UBadge color="neutral" variant="soft" size="xs">{{ presented(row).categoryLabel }}</UBadge>
                     <span v-if="presented(row).sku" class="font-mono text-xs text-muted">SKU {{ presented(row).sku }}</span>
+                    <UBadge v-if="isPublished" color="success" variant="soft" size="xs" icon="i-lucide-circle-check">
+                      Ready to quote
+                    </UBadge>
                   </div>
                   <p class="mt-1.5 break-words text-sm font-semibold leading-6 text-highlighted">{{ presented(row).title }}</p>
                   <div v-if="presented(row).attributes.length" class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-toned">
@@ -377,38 +424,26 @@ onBeforeUnmount(() => {
                       {{ attribute }}
                     </span>
                   </div>
+                  <div v-if="!isPublished" class="mt-2 flex flex-wrap gap-1.5">
+                    <UBadge v-for="item in groupValidationErrors(offers)" :key="item" color="warning" variant="soft" size="xs">
+                      {{ quarantineReasonLabel(item) }}
+                    </UBadge>
+                  </div>
                   <p class="mt-1 truncate text-xs text-muted" :title="row.document?.filename ?? 'Unknown document'">
                     {{ row.document?.filename || 'Unknown document' }}
                   </p>
                 </div>
 
-                <div class="min-w-0">
-                  <p class="text-xs font-medium uppercase tracking-wide text-muted">{{ isPublished ? 'Publication status' : 'Why blocked' }}</p>
-                  <div class="mt-1.5 flex flex-wrap gap-1.5">
-                    <UBadge v-if="isPublished" color="success" variant="soft" size="xs" icon="i-lucide-circle-check">
-                      Ready to quote
-                    </UBadge>
-                    <UBadge v-for="item in row.validation_errors" v-else :key="item" color="warning" variant="soft" size="xs">
-                      {{ humanize(item) }}
-                    </UBadge>
+                <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+                  <div v-for="offer in offers" :key="offer.id" class="rounded-lg border border-default bg-muted/50 px-3 py-2">
+                    <div class="flex items-baseline justify-between gap-3">
+                      <p class="text-xs font-medium text-toned">{{ presented(offer).priceTypeLabel }}</p>
+                      <p class="text-sm font-semibold tabular-nums text-highlighted">{{ formatCurrency(offer.amount) }}</p>
+                    </div>
+                    <p class="mt-0.5 text-right text-xs" :class="offer.basis_quantity && offer.basis_unit ? 'text-muted' : 'font-medium text-warning'">
+                      {{ basisLabel(offer) }}
+                    </p>
                   </div>
-                  <p v-if="isPublished" class="mt-1 text-xs text-muted">Raw source amount reconstructed exactly</p>
-                </div>
-
-                <div>
-                  <p class="text-xs font-medium uppercase tracking-wide text-muted">{{ isPublished ? 'Quoted price' : 'Detected price' }}</p>
-                  <p class="mt-1 text-sm font-semibold tabular-nums">{{ formatCurrency(row.amount) }}</p>
-                  <p class="text-xs" :class="row.basis_quantity && row.basis_unit ? 'text-muted' : 'font-medium text-warning'">
-                    {{ basisLabel(row) }}
-                  </p>
-                </div>
-
-                <div class="min-w-0">
-                  <p class="text-xs font-medium uppercase tracking-wide text-muted">Source document</p>
-                  <p class="mt-1 truncate text-sm" :title="row.document?.filename ?? ''">{{ row.document?.filename || 'Unknown document' }}</p>
-                  <p class="truncate text-xs text-muted">
-                    Page {{ row.source_page ?? '—' }} · table {{ row.source_table_index ?? '—' }} · row {{ row.source_row_index }} · column {{ row.source_col_index }}
-                  </p>
                 </div>
 
                 <UIcon name="i-lucide-chevron-down" class="hidden text-muted transition-transform duration-200 group-open:rotate-180 lg:block" aria-hidden="true" />
@@ -433,13 +468,16 @@ onBeforeUnmount(() => {
                 </div>
 
                 <dl class="grid content-start gap-x-4 gap-y-3 text-sm sm:grid-cols-2">
-                  <div>
-                    <dt class="text-xs text-muted">Raw price cell</dt>
-                    <dd class="mt-0.5 font-mono font-medium">{{ row.raw_price_value }}</dd>
-                  </div>
-                  <div>
-                    <dt class="text-xs text-muted">Source column</dt>
-                    <dd class="mt-0.5 break-words">{{ row.source_column_label || 'Not detected' }}</dd>
+                  <div v-for="offer in offers" :key="`evidence-${offer.id}`" class="rounded-lg border border-default bg-default p-3 sm:col-span-2">
+                    <dt class="text-xs font-medium text-toned">{{ presented(offer).priceTypeLabel }} evidence</dt>
+                    <dd class="mt-1 grid gap-1 text-xs sm:grid-cols-[120px_1fr]">
+                      <span class="text-muted">Raw price cell</span>
+                      <span class="font-mono font-medium">{{ offer.raw_price_value }}</span>
+                      <span class="text-muted">Source column</span>
+                      <span class="break-words">{{ offer.source_column_label || 'Not detected' }}</span>
+                      <span class="text-muted">Source location</span>
+                      <span>Page {{ offer.source_page ?? '—' }} · table {{ offer.source_table_index ?? '—' }} · row {{ offer.source_row_index }} · column {{ offer.source_col_index }}</span>
+                    </dd>
                   </div>
                   <div class="sm:col-span-2">
                     <dt class="text-xs text-muted">Parsed source identity</dt>
@@ -454,8 +492,10 @@ onBeforeUnmount(() => {
                     <dd class="mt-0.5 capitalize">{{ row.status }}</dd>
                   </div>
                   <div class="sm:col-span-2">
-                    <dt class="text-xs text-muted">Record ID</dt>
-                    <dd class="mt-0.5 break-all font-mono text-xs">{{ row.id }}</dd>
+                    <dt class="text-xs text-muted">Price record IDs</dt>
+                    <dd class="mt-0.5 space-y-0.5 break-all font-mono text-xs">
+                      <div v-for="offer in offers" :key="`record-${offer.id}`">{{ offer.id }}</div>
+                    </dd>
                   </div>
                   <div class="sm:col-span-2">
                     <dt class="text-xs text-muted">Detected facets</dt>

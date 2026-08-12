@@ -1133,6 +1133,10 @@ function inferCategory(value: string, rowLabel = ''): CatalogCategory {
   if (/\brccb\b|residual current circuit breaker/.test(row)) return 'rccb'
   if (/\bisolator\b/.test(row)) return 'isolator'
   if (/\bchangeover\b|\bcos\b/.test(row)) return 'switch'
+  // Product-row identity outranks advisory text in a table title. For example,
+  // Anchor switch tables warn that an MCB should be used for geyser loads; that
+  // warning must not turn every switch in the table into an MCB.
+  if (/\bswitch\b|\bbell\s+push\b/.test(row)) return 'switch'
   if (/\bmcb\b|miniature circuit breaker/.test(row)) return 'mcb'
   if (/\bmccb\b|moulded case circuit breaker|molded case circuit breaker/.test(text)) return 'mccb'
   if (/\brcbo\b|residual current circuit breaker with overcurrent/.test(text)) return 'rcbo'
@@ -1141,7 +1145,6 @@ function inferCategory(value: string, rowLabel = ''): CatalogCategory {
   if (/\b[abcd]\s*curve\b/.test(text) && /\b(?:single|double|triple|four)\s*pole\b/.test(text)) return 'mcb'
   if (/\bisolator\b/.test(text)) return 'isolator'
   if (/\bsocket\b/.test(row)) return 'socket'
-  if (/\bswitch\b/.test(row)) return 'switch'
   if (/\brj\s*(?:11|45)\b/.test(identity) && !/\b(?:cable|utp|stp)\b/.test(identity)) return 'socket'
   if (/\brg[ -]?(?:6|11|59)\b|co axial|coaxial/.test(identity)) return 'coaxial_cable'
   if (/\bcctv\b/.test(identity) && /cable|communication|packing|rg[ -]?59/.test(text)) return 'coaxial_cable'
@@ -1506,6 +1509,21 @@ function canonicalNameFor(params: {
       'single-core wire'
     ]).join(' ')
     return [identity, size].filter(Boolean).join(' — ')
+  }
+  if (params.category === 'switch') {
+    let identity = params.rowLabel.replace(/\s+/g, ' ').trim()
+      .replace(/^(?:dura\s+)?switches?\s*(?:\(?isi\)?)?\s*/i, '')
+      .replace(/^isi\s+/i, '')
+    if (params.sku) {
+      const sku = params.sku.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      identity = identity.replace(new RegExp(`^${sku}\\s*[-:|]?\\s*`, 'i'), '')
+    }
+    identity = identity
+      .replace(/\b85361010\b/g, '')
+      .replace(/\b(\d+AX)(\d+\s*way)\b/gi, '$1 $2')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return identity || params.sku || 'switch'
   }
   const values = [params.rowLabel, params.columnLabel]
     .map(value => value.replace(/\s+/g, ' ').trim())

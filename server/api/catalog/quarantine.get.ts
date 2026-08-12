@@ -241,13 +241,30 @@ export default defineEventHandler(async (event) => {
     reason: typeof query.reason === 'string' ? query.reason.trim() : '',
     category: typeof query.category === 'string' ? query.category.trim() : ''
   }
-  const metadata = await getMetadata(client, release.id, status)
-
   if (query.export === 'csv') {
     const exportRows = await fetchExportRows(client, release.id, filters)
     setHeader(event, 'content-type', 'text/csv; charset=utf-8')
     setHeader(event, 'content-disposition', `attachment; filename="${status}-catalogue-${new Date().toISOString().slice(0, 10)}.csv"`)
     return toCsv(exportRows)
+  }
+
+  // Filter metadata scans the complete release. Keep that work off the
+  // catalogue's critical rendering path and let the UI request it once in the
+  // background after the first page is visible.
+  if (query.metadata_only === 'true') {
+    const metadata = await getMetadata(client, release.id, status)
+    return {
+      status,
+      release,
+      summary: {
+        total_current: status === 'published' ? release.offers_published : release.offers_quarantined,
+        filtered_total: status === 'published' ? release.offers_published : release.offers_quarantined,
+        reason_counts: metadata.reasonCounts,
+        category_counts: metadata.categoryCounts
+      },
+      pagination: { page: 1, page_size: 0, page_count: 1 },
+      rows: []
+    }
   }
 
   const pageSize = Math.min(100, Math.max(10, Number(query.page_size) || 50))
@@ -283,8 +300,8 @@ export default defineEventHandler(async (event) => {
     summary: {
       total_current: status === 'published' ? release.offers_published : release.offers_quarantined,
       filtered_total: filteredTotal,
-      reason_counts: metadata.reasonCounts,
-      category_counts: metadata.categoryCounts
+      reason_counts: [],
+      category_counts: []
     },
     pagination: {
       page,

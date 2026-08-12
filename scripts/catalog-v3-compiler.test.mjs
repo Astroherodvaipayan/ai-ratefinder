@@ -687,13 +687,15 @@ test('prefers an explicit item code and labels unit versus pack MRP offers', () 
 
   assert.deepEqual(result.offers.map(offer => ({
     sku: offer.sku,
+    category: offer.category,
+    canonical_name: offer.canonical_name,
     amount: offer.amount,
     basis_quantity: offer.basis_quantity,
     price_type: offer.facets.price_type,
     current_a: offer.facets.current_a
   })), [
-    { sku: '21011', amount: 73, basis_quantity: 1, price_type: 'unit_sale_price', current_a: 10 },
-    { sku: '21011', amount: 1460, basis_quantity: 20, price_type: 'mrp', current_a: 10 }
+    { sku: '21011', category: 'switch', canonical_name: '10AX 1 Way Switch 100W SBL Load', amount: 73, basis_quantity: 1, price_type: 'unit_sale_price', current_a: 10 },
+    { sku: '21011', category: 'switch', canonical_name: '10AX 1 Way Switch 100W SBL Load', amount: 1460, basis_quantity: 20, price_type: 'mrp', current_a: 10 }
   ])
 })
 

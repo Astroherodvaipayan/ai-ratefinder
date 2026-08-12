@@ -1,4 +1,4 @@
-export const CATALOGUE_COMPILER_VERSION = 'catalog-v4.0.0'
+export const CATALOGUE_COMPILER_VERSION = 'catalog-v4.1.0'
 
 export const CATALOG_CATEGORIES = [
   'coaxial_cable',

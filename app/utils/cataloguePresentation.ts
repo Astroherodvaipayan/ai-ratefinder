@@ -1,4 +1,6 @@
 export interface CataloguePresentationInput {
+  id?: string
+  document_id?: string
   category: string
   canonical_name: string
   brand: string | null
@@ -10,7 +12,9 @@ export interface CataloguePresentationInput {
   source_row_label: string | null
   source_column_label: string | null
   source_excerpt?: string
+  source_table_index?: number | null
   source_row_index?: number
+  source_col_index?: number
   vendor?: { name: string } | null
 }
 
@@ -19,6 +23,13 @@ export interface CataloguePresentation {
   categoryLabel: string
   sku: string | null
   attributes: string[]
+  priceTypeLabel: string
+}
+
+export interface CatalogueProductGroup<T extends CataloguePresentationInput> {
+  key: string
+  primary: T
+  offers: T[]
 }
 
 function compact(value: unknown) {
@@ -27,6 +38,75 @@ function compact(value: unknown) {
 
 function titleCase(value: string) {
   return value.toLowerCase().replace(/\b\p{L}/gu, letter => letter.toUpperCase())
+}
+
+const CATEGORY_LABELS: Record<string, string> = {
+  coaxial_cable: 'Coaxial cables',
+  data_cable: 'Data cables',
+  telephone_cable: 'Telephone cables',
+  power_cable: 'Power cables',
+  flexible_cable: 'Flexible cables',
+  single_core_wire: 'Single-core wires',
+  mcb: 'Miniature circuit breakers (MCB)',
+  mccb: 'Moulded-case circuit breakers (MCCB)',
+  rccb: 'Residual-current breakers (RCCB)',
+  rcbo: 'Residual-current breakers with overcurrent (RCBO)',
+  isolator: 'Isolators',
+  distribution_board: 'Distribution boards',
+  junction_box: 'Junction boxes',
+  modular_box: 'Modular boxes',
+  switch: 'Switches',
+  socket: 'Sockets',
+  conduit: 'Conduits and fittings',
+  accessory: 'Electrical accessories',
+  other: 'Other products'
+}
+
+const CATEGORY_ITEM_LABELS: Record<string, string> = {
+  coaxial_cable: 'Coaxial cable',
+  data_cable: 'Data cable',
+  telephone_cable: 'Telephone cable',
+  power_cable: 'Power cable',
+  flexible_cable: 'Flexible cable',
+  single_core_wire: 'Single-core wire',
+  mcb: 'MCB',
+  mccb: 'MCCB',
+  rccb: 'RCCB',
+  rcbo: 'RCBO',
+  isolator: 'Isolator',
+  distribution_board: 'Distribution board',
+  junction_box: 'Junction box',
+  modular_box: 'Modular box',
+  switch: 'Switch',
+  socket: 'Socket',
+  conduit: 'Conduit or fitting',
+  accessory: 'Electrical accessory',
+  other: 'Other product'
+}
+
+const QUARANTINE_REASON_LABELS: Record<string, string> = {
+  unknown_category: 'Product category not recognized',
+  missing_canonical_name: 'Product name missing',
+  missing_product_identity: 'Product identity or SKU missing',
+  invalid_amount: 'Price is invalid',
+  raw_price_is_not_a_plain_monetary_value: 'Price cell contains non-price text',
+  invalid_basis_quantity: 'Pack quantity is invalid',
+  missing_price_basis: 'Price unit or pack size missing',
+  invalid_basis_unit: 'Price unit not recognized',
+  invalid_source_coordinate: 'Source location missing',
+  missing_source_excerpt: 'Source evidence missing',
+  specification_column_published: 'Specification was mistaken for a price'
+}
+
+export function catalogueCategoryFilterLabel(value: string) {
+  return CATEGORY_LABELS[value] || titleCase(value.replaceAll('_', ' '))
+}
+
+export function quarantineReasonLabel(value: string) {
+  if (QUARANTINE_REASON_LABELS[value]) return QUARANTINE_REASON_LABELS[value]
+  const missingFacet = value.match(/^missing_required_facet:(.+)$/)
+  if (missingFacet?.[1]) return `Required specification missing: ${missingFacet[1].replaceAll('_', ' ')}`
+  return titleCase(value.replaceAll('_', ' '))
 }
 
 function formatNumber(value: number) {
@@ -54,6 +134,40 @@ function unique(values: Array<string | null | undefined>) {
   })
 }
 
+function escaped(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function priceType(row: CataloguePresentationInput) {
+  const facet = textFacet(row.facets, 'price_type')?.toLowerCase()
+  if (facet) return facet
+  const source = compact(row.source_column_label).toLowerCase()
+  if (/maximum retail price|\bmrp\b/.test(source)) return 'mrp'
+  if (/unit sale price|price per (?:number|piece|unit)/.test(source)) return 'unit_sale_price'
+  if (/\bnet price\b|\bnet rate\b/.test(source)) return 'net_price'
+  if (/\blist price\b/.test(source)) return 'list_price'
+  return 'price'
+}
+
+function priceTypeLabel(row: CataloguePresentationInput) {
+  const type = priceType(row)
+  if (type === 'unit_sale_price') return 'Unit price'
+  if (type === 'mrp') return row.basis_quantity && row.basis_quantity > 1 ? 'Pack MRP' : 'MRP'
+  if (type === 'net_price') return 'Net price'
+  if (type === 'list_price') return 'List price'
+  if (type === 'line_total') return 'Line total'
+  return 'Quoted price'
+}
+
+function alignedSourceCells(row: CataloguePresentationInput) {
+  const lines = compact(row.source_excerpt).split(/(?=row\s+\d+\s*:)/i)
+  const rowLine = lines.find(line => row.source_row_index === undefined
+    || new RegExp(`^row\\s+${row.source_row_index}\\s*:`, 'i').test(line))
+  if (!rowLine) return []
+  return [...rowLine.matchAll(/\[(\d+)]\s*([^|]*)/g)]
+    .map(match => ({ index: Number(match[1]), value: compact(match[2]) }))
+}
+
 function isUsefulSku(value: string | null) {
   const sku = compact(value)
   if (!sku) return false
@@ -75,6 +189,47 @@ function alignedWireCurrent(row: CataloguePresentationInput, construction: RegEx
   if (!constructionCell) return null
   const current = Number(cells.find(cell => cell.index === constructionCell.index + 1)?.value)
   return Number.isFinite(current) && current > 0 ? current : null
+}
+
+function switchDescription(row: CataloguePresentationInput) {
+  const alignedDescription = alignedSourceCells(row)
+    .map(cell => cell.value)
+    .find(value => /\b(?:switch|bell\s+push)\b/i.test(value)
+      && /\p{L}/u.test(value)
+      && !/\b(?:unit sale price|maximum retail price|standard pack)\b/i.test(value))
+
+  let value = compact(alignedDescription || row.source_row_label || row.canonical_name.split(/\s+—\s+/)[0])
+  value = value
+    .replace(/^(?:dura\s+)?switches?\s*(?:\(?isi\)?)?\s*/i, '')
+    .replace(/^isi\s+/i, '')
+  const sku = compact(row.sku)
+  if (sku) value = value.replace(new RegExp(`^${escaped(sku)}\\s*[-:|]?\\s*`, 'i'), '')
+  value = value
+    .replace(/\b85361010\b/g, '')
+    .replace(/\b(\d+AX)(\d+\s*way)\b/gi, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return value
+    .replace(/\b(\d+)\s*A\s+Bell Push\b/i, '$1 A bell push')
+    .replace(/\b(\d+)\s*Way Switch\b/i, '$1-way switch')
+    .replace(/\bWith Neon\b/i, 'with neon')
+    .replace(/\b(\d+)\s*W\s+SBL Load\b/i, '$1 W SBL load')
+}
+
+function switchPresentation(row: CataloguePresentationInput): CataloguePresentation | null {
+  const description = switchDescription(row)
+  const isSwitch = row.category === 'switch'
+    || /\b(?:switch|bell\s+push)\b/i.test(description)
+  if (!isSwitch || !description) return null
+
+  return {
+    title: description,
+    categoryLabel: 'Switch',
+    sku: isUsefulSku(row.sku) ? compact(row.sku) : null,
+    attributes: [],
+    priceTypeLabel: priceTypeLabel(row)
+  }
 }
 
 function wirePresentation(row: CataloguePresentationInput, evidence: string): CataloguePresentation | null {
@@ -112,7 +267,8 @@ function wirePresentation(row: CataloguePresentationInput, evidence: string): Ca
       construction ? `${construction[1]} strands × ${construction[2]} mm` : null,
       current ? `${formatNumber(current)} A` : null,
       material
-    ])
+    ]),
+    priceTypeLabel: priceTypeLabel(row)
   }
 }
 
@@ -125,11 +281,45 @@ export function cataloguePresentation(row: CataloguePresentationInput): Catalogu
   ].filter(Boolean).join(' '))
   const wire = wirePresentation(row, evidence)
   if (wire) return wire
+  const switchItem = switchPresentation(row)
+  if (switchItem) return switchItem
 
   return {
     title: compact(row.canonical_name) || 'Unnamed catalogue item',
-    categoryLabel: titleCase(row.category.replaceAll('_', ' ')),
+    categoryLabel: CATEGORY_ITEM_LABELS[row.category] || titleCase(row.category.replaceAll('_', ' ')),
     sku: isUsefulSku(row.sku) ? compact(row.sku) : null,
-    attributes: []
+    attributes: [],
+    priceTypeLabel: priceTypeLabel(row)
   }
+}
+
+export function groupCatalogueRows<T extends CataloguePresentationInput>(rows: T[]): CatalogueProductGroup<T>[] {
+  const groups = new Map<string, CatalogueProductGroup<T>>()
+  for (const row of rows) {
+    const hasSourceIdentity = Boolean(row.document_id)
+      && row.source_table_index !== undefined
+      && row.source_table_index !== null
+      && row.source_row_index !== undefined
+    const key = hasSourceIdentity
+      ? [
+          row.document_id,
+          row.source_table_index,
+          row.source_row_index,
+          compact(row.sku),
+          cataloguePresentation(row).title.toLowerCase()
+        ].join(':')
+      : row.id || `${compact(row.sku)}:${cataloguePresentation(row).title}`
+    const existing = groups.get(key)
+    if (existing) existing.offers.push(row)
+    else groups.set(key, { key, primary: row, offers: [row] })
+  }
+
+  for (const group of groups.values()) {
+    group.offers.sort((left, right) => {
+      const rank = (row: T) => priceType(row) === 'unit_sale_price' ? 0 : priceType(row) === 'mrp' ? 2 : 1
+      return rank(left) - rank(right) || (left.source_col_index ?? 0) - (right.source_col_index ?? 0)
+    })
+    group.primary = group.offers[0]!
+  }
+  return [...groups.values()]
 }
