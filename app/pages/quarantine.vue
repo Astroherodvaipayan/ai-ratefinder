@@ -103,6 +103,16 @@ function basisLabel(row: CatalogueRow) {
   return `per ${row.basis_quantity} ${row.basis_unit}${row.basis_quantity === 1 ? '' : 's'}`
 }
 
+const presentationCache = new WeakMap<CatalogueRow, ReturnType<typeof cataloguePresentation>>()
+
+function presented(row: CatalogueRow) {
+  const cached = presentationCache.get(row)
+  if (cached) return cached
+  const value = cataloguePresentation(row)
+  presentationCache.set(row, value)
+  return value
+}
+
 async function load() {
   pending.value = true
   loadError.value = null
@@ -357,12 +367,18 @@ onBeforeUnmount(() => {
               <summary class="grid cursor-pointer list-none gap-3 px-4 py-4 transition hover:bg-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary lg:grid-cols-[minmax(260px,1.2fr)_minmax(210px,0.8fr)_minmax(130px,0.45fr)_minmax(250px,0.9fr)_24px] lg:items-center">
                 <div class="min-w-0">
                   <div class="flex flex-wrap items-center gap-2">
-                    <UBadge color="neutral" variant="soft" size="xs" class="capitalize">{{ humanize(row.category) }}</UBadge>
-                    <span v-if="row.sku" class="font-mono text-xs text-muted">{{ row.sku }}</span>
+                    <UBadge color="neutral" variant="soft" size="xs">{{ presented(row).categoryLabel }}</UBadge>
+                    <span v-if="presented(row).sku" class="font-mono text-xs text-muted">SKU {{ presented(row).sku }}</span>
                   </div>
-                  <p class="mt-1.5 break-words text-sm font-semibold text-highlighted">{{ row.canonical_name }}</p>
+                  <p class="mt-1.5 break-words text-sm font-semibold leading-6 text-highlighted">{{ presented(row).title }}</p>
+                  <div v-if="presented(row).attributes.length" class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-toned">
+                    <span v-for="attribute in presented(row).attributes" :key="attribute" class="inline-flex items-center gap-1">
+                      <UIcon name="i-lucide-dot" class="text-muted" aria-hidden="true" />
+                      {{ attribute }}
+                    </span>
+                  </div>
                   <p class="mt-1 truncate text-xs text-muted" :title="row.document?.filename ?? 'Unknown document'">
-                    {{ row.vendor?.name || row.brand || 'Unknown vendor' }} · {{ row.document?.filename || 'Unknown document' }}
+                    {{ row.document?.filename || 'Unknown document' }}
                   </p>
                 </div>
 
@@ -388,9 +404,9 @@ onBeforeUnmount(() => {
                 </div>
 
                 <div class="min-w-0">
-                  <p class="text-xs font-medium uppercase tracking-wide text-muted">Source position</p>
-                  <p class="mt-1 truncate text-sm" :title="row.source_row_label ?? ''">{{ row.source_row_label || 'No row identity' }}</p>
-                  <p class="truncate text-xs text-muted" :title="row.source_column_label ?? ''">
+                  <p class="text-xs font-medium uppercase tracking-wide text-muted">Source document</p>
+                  <p class="mt-1 truncate text-sm" :title="row.document?.filename ?? ''">{{ row.document?.filename || 'Unknown document' }}</p>
+                  <p class="truncate text-xs text-muted">
                     Page {{ row.source_page ?? '—' }} · table {{ row.source_table_index ?? '—' }} · row {{ row.source_row_index }} · column {{ row.source_col_index }}
                   </p>
                 </div>
@@ -424,6 +440,10 @@ onBeforeUnmount(() => {
                   <div>
                     <dt class="text-xs text-muted">Source column</dt>
                     <dd class="mt-0.5 break-words">{{ row.source_column_label || 'Not detected' }}</dd>
+                  </div>
+                  <div class="sm:col-span-2">
+                    <dt class="text-xs text-muted">Parsed source identity</dt>
+                    <dd class="mt-0.5 break-words text-xs leading-5">{{ row.canonical_name }}</dd>
                   </div>
                   <div>
                     <dt class="text-xs text-muted">Package / MOQ</dt>

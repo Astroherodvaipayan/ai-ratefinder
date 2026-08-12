@@ -118,6 +118,23 @@ test('preserves equal prices under separate multi-row textual variant headers', 
   assert.equal(dedupeDocumentOffers(result.offers).length, 8)
 })
 
+test('identifies KEI Conflame wire without leaking table headers into the product name', () => {
+  const title = 'INDUSTRIAL MULTI STRAND CABLES | KEI PVC INSULATED INDUSTRIAL SINGLE CORE UNSHEATHED INDUSTRIAL MULTISTRAND CABLES WITH FR / FRLSH / HFFR (ZHFR) PROPERTIES, WITH FLEXIBLE BRIGHT ANNEALED BARE COPPER CONDUCTOR FOR VOLTAGE GRADE UPTO 1100 V | CONDUCTOR (AREA SQ.MM) | NO. & SIZE OF WIRE IN MM | CURRENT (AMPS) BUNCHED & ENCLOSED IN CONDUIT OR TRUNKING | Std. Coil Packing | No. of Coils | HOMECAB (FR) | CONFLAME (FRLSH) | BANFIRE (ZHFR / HFFR)'
+  const result = compile([
+    ['CONDUCTOR AREA SQ.MM', 'NO. & SIZE OF WIRE IN MM', 'CURRENT (AMPS) BUNCHED & ENCLOSED IN CONDUIT OR TRUNKING', 'Std. Coil Packing', 'No. of Coils', 'HOMECAB (FR) RATE PER COIL', 'HOMECAB RATE PER MTR', 'CONFLAME (FRLSH) RATE PER COIL', 'CONFLAME RATE PER MTR', 'BANFIRE (ZHFR / HFFR) RATE PER COIL', 'BANFIRE RATE PER MTR'],
+    ['1.00 SQ.MM', '32/0.20', '11', '', '6', '10700', '35.67', '11160', '37.20', '11560', '38.53']
+  ], 'KEI WIRE AND CABLE PRICE LIST DT.14.05.2026.pdf', 0, title)
+
+  const offer = result.offers.find(candidate => candidate.amount === 11160)
+  assert.ok(offer)
+  assert.equal(offer.category, 'single_core_wire')
+  assert.equal(offer.canonical_name, 'Conflame FRLSH single-core wire — 1 sq mm')
+  assert.equal(offer.sku, null)
+  assert.equal(offer.facets.conductor_stranding, '32/0.20 mm')
+  assert.equal(offer.facets.current_a, 11)
+  assert.equal(offer.basis_unit, 'coil')
+})
+
 test('keeps a generic size header aligned with transposed price values', () => {
   const result = compile([
     ['Size', '0.50mm', '0.75mm', '1.00mm', '1.50mm', '2.50mm'],

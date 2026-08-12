@@ -384,6 +384,11 @@ export function analyzeSourceTableDeterministically(options: Omit<CompileTableOp
         const category = inferCategory(variantContext, variantRowLabel)
         const facetContext = [options.table.title, section, variantRowLabel, variantColumnLabel].filter(Boolean).join(' ')
         const facets = inferFacets(facetContext, variantRowLabel, variantColumnLabel, category)
+        if (facets.current_a === undefined && ['single_core_wire', 'flexible_cable', 'power_cable'].includes(category)) {
+          const currentIndex = columnHeaders.findIndex(header => /\bcurrent\b.*\b(?:amps?|a)\b/.test(normalized(header)))
+          const currentValue = currentIndex >= 0 ? Number(semanticRow[currentIndex]?.trim()) : Number.NaN
+          if (Number.isFinite(currentValue) && currentValue > 0) facets.current_a = currentValue
+        }
         const priceType = priceTypeFromRow(row) ?? priceTypeFromLabel(variantColumnLabel || columnLabel)
         if (priceType) facets.price_type = priceType
         if (category === 'telephone_cable' && facets.conductor_size_mm === undefined) {
@@ -391,7 +396,11 @@ export function analyzeSourceTableDeterministically(options: Omit<CompileTableOp
             ?? inferTelephoneConductorSizeFromRow(semanticRow, colIndex)
           if (telephoneSize !== null) facets.conductor_size_mm = telephoneSize
         }
-        let basis = inferBasis([variantColumnLabel, activeBasisContext, section, options.table.title, semanticRow.join(' ')].filter(Boolean).join(' '), category)
+        const columnBasis = inferBasis(variantColumnLabel, category)
+        const columnHasExplicitBasis = /(?:\bper\s*(?:meters?|metres?|mtrs?|coil|roll|piece|pc|unit|number)|\brate\s*(?:per\s*)?(?:meters?|metres?|mtrs?|coil|roll|piece|pc|unit|number)|\d+(?:\.\d+)?\s*(?:meters?|metres?|mtrs?)\b)/.test(normalized(variantColumnLabel))
+        let basis = columnHasExplicitBasis && columnBasis.quantity && columnBasis.unit
+          ? columnBasis
+          : inferBasis([activeBasisContext, section, options.table.title, semanticRow.join(' ')].filter(Boolean).join(' '), category)
         if (structuralPrice && (!basis.quantity || !basis.unit)) {
           basis = { quantity: 1, unit: 'piece', packageType: null, inferred: true }
         }
@@ -1143,13 +1152,17 @@ function inferCategory(value: string, rowLabel = ''): CatalogCategory {
   if (/\b(?:lugs?|terminals?|ferrules?|thimbles?|glands?|connectors?|cable ties?|fan regulators?|regulators?|dimmers?|indicators?|plates?|covers?|frames?|cabinets?|enclosures?|plugs?|bells?|buzzers?|adapters?|adaptors?|clips?|clamps?|brackets?|sealing rings?|gaskets?|knobs?|partitions?|lubricants?)\b|cover\s*plate/.test(row)) return 'accessory'
   if (/\bplug\s*top\b/.test(identity)) return 'accessory'
   if (/modular box|module box|\d+\s*m\s*(?:box|cabinet)|(?:surface|flush)\s+(?:mounting|wall)\s+box|(?:box|cabinet)\s*[-–]?\s*\d+\s*m\b/.test(identity)) return 'modular_box'
+  // Wire tables often mention installation inside conduit or trunking in a
+  // current-rating header. Resolve the actual product before those generic
+  // installation terms reach the conduit/fittings classifier.
+  if (/single core|frlsh|frls|hffr|zhfr|homecab|conflame|banfire/.test(text)
+    && /wire|cable|conductor|homecab|conflame|banfire/.test(text)) return 'single_core_wire'
   if (/\b(?:conduits?|pipes?|fittings?|elbows?|bends?|couplers?|couplings?|socket fitting|tees?|reducers?|saddles?|trunking|internal angle|external angle|unions?|end caps?|strainer|floor trap|[ps]\s+trap|nahani trap|air admittance valve|ball valve|vent cowel|sovent|compensator|single y|double y|door y|red cross|red y)\b/.test(text)
     || /\b(?:pvc|cpvc|upvc|ppr)\s+(?:pipes?\s*(?:&|and)\s*)?fittings?\b/.test(text)
     || /\bsockett?edpipe\b/.test(text)) return 'conduit'
   if (/flexible|\bflx\b/.test(text) && /cable|wire/.test(text)) return 'flexible_cable'
   if (/submersible/.test(text) && /cable/.test(text)) return 'flexible_cable'
   if (/multi\s*core/.test(text) && /(?:frls|pvc insulated)/.test(text) && /copper/.test(text) && /(?:round sheathed|industrial cable)/.test(text)) return 'flexible_cable'
-  if (/single core|frlsh|frls|hffr|zhfr|homecab|conflame|banfire/.test(text) && /wire|cable|conductor|homecab|conflame|banfire/.test(text)) return 'single_core_wire'
   if (/armoured|xlpe|power cable|\b[ax]?2x[wyf]+\b/.test(text) && /cable/.test(text)) return 'power_cable'
   if (/\b(?:lugs?|terminals?|ferrules?|thimbles?|glands?|connectors?|cable ties?|fan regulators?|regulators?|dimmers?|indicators?|plates?|covers?|frames?|cabinets?|enclosures?|plugs?|bells?|buzzers?|adapters?|adaptors?|clips?|clamps?|brackets?|sealing rings?|gaskets?|knobs?|partitions?|lubricants?)\b/.test(text)) return 'accessory'
   if (/conduit|\bpipe\b/.test(text)) return 'conduit'
@@ -1202,6 +1215,10 @@ function inferFacets(context: string, rowLabel: string, columnLabel: string, cat
   }
   if (facets.cores === undefined && /\bsingle\s*core\b/.test(columnText)) facets.cores = 1
   if (category === 'single_core_wire' && facets.cores === undefined) facets.cores = 1
+  if (['single_core_wire', 'flexible_cable', 'power_cable'].includes(category)) {
+    const construction = rowText.match(/\b(\d{1,3})\s*\/\s*(\d+(?:\.\d+)?)\b/)
+    if (construction) facets.conductor_stranding = `${construction[1]}/${construction[2]} mm`
+  }
   setNumber('pairs', /\b(\d+(?:\.\d+)?)\s*pair\b/)
   if (category === 'telephone_cable') {
     const conductorSize = rowText.match(/\b\d+(?:\.\d+)?\s*pair\D+(\d+(?:\.\d+)?)\b/)
@@ -1276,7 +1293,7 @@ function normalizeVoltageGrade(value: string) {
 
 function inferBasis(value: string, category: CatalogCategory) {
   const text = normalized(value)
-  const length = text.match(/(?:^|\D)(\d+(?:\.\d+)?)\s*meter\b/)
+  const length = text.match(/(?:^|\D)(\d+(?:\.\d+)?)\s*(?:meters?|metres?|mtrs?)\b/)
   const scheduleJoinedToLength = length?.[1]
     ? new RegExp(`\\bsch\\s*${length[1].replace('.', '\\.')}\\s*meter\\b`).test(text)
     : false
@@ -1447,9 +1464,9 @@ function inferSkuFromRow(
   })))
   matches.sort((a, b) => b.score - a.score || b.code.length - a.code.length)
   if (matches[0]?.code) return matches[0].code
-  if (row.slice(0, priceColIndex).some(isProductDescriptorCell)) {
-    const numericSku = row.slice(0, priceColIndex).find(value => /^\d{4,}$/.test(value.trim()))
-    if (numericSku) return numericSku.trim()
+  const leadingNumericSku = row[0]?.trim() ?? ''
+  if (/^\d{4,}$/.test(leadingNumericSku) && row.slice(1, priceColIndex).some(isProductDescriptorCell)) {
+    return leadingNumericSku
   }
   return null
 }
@@ -1461,6 +1478,7 @@ function codeCandidates(value: string) {
   const spaced = compact.match(/\b[A-Z]{2,}\s+\d{2,}[A-Z0-9]*\b/g) ?? []
   return uniqueStrings([...tokens, ...spaced, numeric ?? ''])
     .filter(code => !/^(?:RATE|MRP|SIZE|PAIR|TRAID|IP\d+|\d+(?:V|A|KA|M))$/i.test(code))
+    .filter(code => !/^(?:MM|SQ\.?\s*MM|SQMM|AMP|AMPS)\s+\d/i.test(code))
 }
 
 function codeScore(code: string, source: string, cellIndex: number) {
@@ -1478,11 +1496,26 @@ function canonicalNameFor(params: {
   facets: CatalogFacets
   sku: string | null
 }) {
+  if (params.category === 'single_core_wire') {
+    const series = params.columnLabel.match(/\b(homecab|conflame|banfire)\b/i)?.[1]
+    const rating = typeof params.facets.fire_rating === 'string' ? params.facets.fire_rating.toUpperCase() : null
+    const size = typeof params.facets.size_sqmm === 'number' ? `${params.facets.size_sqmm} sq mm` : null
+    const identity = uniqueStrings([
+      series ? titleCaseWords(series) : '',
+      rating ?? '',
+      'single-core wire'
+    ]).join(' ')
+    return [identity, size].filter(Boolean).join(' — ')
+  }
   const values = [params.rowLabel, params.columnLabel]
     .map(value => value.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
   const name = uniqueStrings(values).join(' — ')
   return name || params.sku || params.category.replace(/_/g, ' ')
+}
+
+function titleCaseWords(value: string) {
+  return value.toLowerCase().replace(/\b[a-z]/g, letter => letter.toUpperCase())
 }
 
 function inferMoq(row: string[], columnHeaders: string[]) {
