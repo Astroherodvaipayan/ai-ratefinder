@@ -1,4 +1,4 @@
-export const CATALOGUE_COMPILER_VERSION = 'catalog-v4.1.0'
+export const CATALOGUE_COMPILER_VERSION = 'catalog-v4.2.0'
 
 export const CATALOG_CATEGORIES = [
   'coaxial_cable',
@@ -55,6 +55,21 @@ const VALID_BASIS_UNITS = new Set([
   'piece', 'meter', 'coil', 'roll', 'box', 'set', 'pair', 'unit', 'kg', 'litre', 'packet', 'dozen'
 ])
 
+export function explicitSourceBasis(value: string | null | undefined) {
+  const text = String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+  const length = text.match(/\b(?:rate|price|mrp|cost)?\s*(?:per|\/)\s*(\d+(?:\.\d+)?)?\s*(?:meters?|metres?|mtrs?|mtr\.?)(?:\b|$)/)
+  if (length) {
+    const packageType = /\bcoils?\b/.test(text) ? 'coil' : /\brolls?\b/.test(text) ? 'roll' : null
+    return { quantity: Number(length[1] || 1), unit: 'meter', packageType }
+  }
+  if (/\b(?:rate|price|mrp|cost)?\s*(?:per|\/)\s*coils?\b/.test(text)) return { quantity: 1, unit: 'coil', packageType: 'coil' }
+  if (/\b(?:rate|price|mrp|cost)?\s*(?:per|\/)\s*rolls?\b/.test(text)) return { quantity: 1, unit: 'roll', packageType: 'roll' }
+  if (/\b(?:rate|price|mrp|cost)?\s*(?:per|\/)\s*(?:pieces?|pcs?|numbers?|unit(?:s|in)?)\b|\bratepc\b/.test(text)) {
+    return { quantity: 1, unit: 'piece', packageType: null }
+  }
+  return null
+}
+
 export function validateCompiledOffer(offer: Omit<CompiledCatalogOffer, 'validation_errors'>) {
   const errors: string[] = []
   if (!CATALOG_CATEGORIES.includes(offer.category)) errors.push('unknown_category')
@@ -69,6 +84,26 @@ export function validateCompiledOffer(offer: Omit<CompiledCatalogOffer, 'validat
   }
   if (offer.basis_quantity === null || !offer.basis_unit) errors.push('missing_price_basis')
   if (offer.basis_unit && !VALID_BASIS_UNITS.has(offer.basis_unit)) errors.push('invalid_basis_unit')
+  const explicitBasis = explicitSourceBasis(offer.source_column_label)
+  if (explicitBasis?.unit === 'meter'
+    && (offer.basis_unit !== 'meter'
+      || offer.basis_quantity !== explicitBasis.quantity
+      || (explicitBasis.packageType ?? null) !== (offer.package_type ?? null))) {
+    errors.push('source_price_basis_mismatch')
+  }
+  if (explicitBasis?.unit === 'coil') {
+    const validCoilBasis = (offer.basis_unit === 'coil' && offer.basis_quantity === 1)
+      || (offer.basis_unit === 'meter' && Boolean(offer.basis_quantity) && offer.package_type === 'coil')
+    if (!validCoilBasis) errors.push('source_price_basis_mismatch')
+  }
+  if (explicitBasis?.unit === 'roll') {
+    const validRollBasis = (offer.basis_unit === 'roll' && offer.basis_quantity === 1)
+      || (offer.basis_unit === 'meter' && Boolean(offer.basis_quantity) && offer.package_type === 'roll')
+    if (!validRollBasis) errors.push('source_price_basis_mismatch')
+  }
+  if (explicitBasis?.unit === 'piece' && (offer.basis_unit !== 'piece' || offer.basis_quantity !== 1)) {
+    errors.push('source_price_basis_mismatch')
+  }
   if (offer.source_row_index < 0 || offer.source_col_index < 0) errors.push('invalid_source_coordinate')
   if (!offer.source_excerpt.trim()) errors.push('missing_source_excerpt')
   const sourceColumn = offer.source_column_label?.toLowerCase().replace(/\s+/g, ' ') ?? ''

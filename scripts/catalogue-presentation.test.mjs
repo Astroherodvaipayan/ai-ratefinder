@@ -5,6 +5,7 @@ import { createJiti } from 'jiti'
 const jiti = createJiti(import.meta.url, { interopDefault: true })
 const {
   catalogueCategoryFilterLabel,
+  catalogueBasisLabel,
   cataloguePresentation,
   groupCatalogueRows,
   quarantineReasonLabel
@@ -31,7 +32,7 @@ test('turns the noisy KEI wire record into a customer-readable identity', () => 
   assert.equal(result.categoryLabel, 'Single-core wire')
   assert.equal(result.sku, null)
   assert.deepEqual(result.attributes, ['32 strands × 0.20 mm', '11 A', 'Copper conductor'])
-  assert.equal(result.priceTypeLabel, 'Quoted price')
+  assert.equal(result.priceTypeLabel, 'Coil price')
 })
 
 test('turns Anchor switch price columns into one readable product with two labeled prices', () => {
@@ -84,6 +85,8 @@ test('uses buyer-facing dropdown labels', () => {
   assert.equal(catalogueCategoryFilterLabel('single_core_wire'), 'Single-core wires')
   assert.equal(quarantineReasonLabel('missing_price_basis'), 'Price unit or pack size missing')
   assert.equal(quarantineReasonLabel('missing_required_facet:current_a'), 'Required specification missing: current a')
+  assert.equal(catalogueBasisLabel({ basis_quantity: 300, basis_unit: 'meter', package_type: 'coil' }), 'per 300 m coil')
+  assert.equal(catalogueBasisLabel({ basis_quantity: 1, basis_unit: 'meter', package_type: null }), 'per metre')
 })
 
 test('does not merge different matrix variants or mistake an advisory warning for product identity', () => {

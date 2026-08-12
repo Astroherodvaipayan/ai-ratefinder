@@ -15,6 +15,7 @@ const jiti = createJiti(import.meta.url, { interopDefault: true })
 const { extractSourceTables, findRepeatedSourceBlocks, findTruncatedSourceRows } = await jiti.import('../server/utils/catalog/sourceTables.ts')
 const { analyzeSourceTableDeterministically, dedupeDocumentOffers, strictMoney } = await jiti.import('../server/utils/catalog/compiler.ts')
 const { CATALOGUE_COMPILER_VERSION } = await jiti.import('../server/utils/catalog/contracts.ts')
+const { auditCatalogueOfferSemantics } = await jiti.import('../server/utils/catalog/quality.ts')
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
 const outputPath = process.argv[2] ?? 'tmp/catalog-v2-all.json'
 
@@ -37,6 +38,7 @@ if (activeRelease?.id) {
       .from('catalog_offers')
       .select('document_id, status')
       .eq('release_id', activeRelease.id)
+      .order('id')
       .range(from, from + 999)
     if (activeError) throw activeError
     for (const offer of data ?? []) {
@@ -109,6 +111,7 @@ for (const [index, doc] of (documents ?? []).entries()) {
   if (offers.length > 0 && quarantined.length / offers.length > 0.35) {
     qualityFailures.push({ reason: 'excessive_quarantine_ratio', ratio: quarantined.length / offers.length })
   }
+  qualityFailures.push(...auditCatalogueOfferSemantics(offers))
   console.log(`[${index + 1}/${documents.length}] ${doc.filename} tables=${tables.length} raw_offers=${rawOffers.length} duplicates_removed=${rawOffers.length - offers.length} published=${published.length} quarantined=${quarantined.length} quality_failures=${qualityFailures.length}`)
   compiledDocuments.push({
     document: { id: doc.id, owner_id: doc.owner_id, vendor_id: doc.vendor_id, filename: doc.filename, page_count: doc.page_count, vendor: doc.vendor?.name ?? null },

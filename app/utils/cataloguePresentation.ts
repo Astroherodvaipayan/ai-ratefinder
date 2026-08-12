@@ -8,6 +8,7 @@ export interface CataloguePresentationInput {
   facets: Record<string, unknown>
   basis_quantity: number | null
   basis_unit: string | null
+  package_type?: string | null
   source_table_title: string | null
   source_row_label: string | null
   source_column_label: string | null
@@ -95,7 +96,8 @@ const QUARANTINE_REASON_LABELS: Record<string, string> = {
   invalid_basis_unit: 'Price unit not recognized',
   invalid_source_coordinate: 'Source location missing',
   missing_source_excerpt: 'Source evidence missing',
-  specification_column_published: 'Specification was mistaken for a price'
+  specification_column_published: 'Specification was mistaken for a price',
+  source_price_basis_mismatch: 'Price unit conflicts with the source document'
 }
 
 export function catalogueCategoryFilterLabel(value: string) {
@@ -142,6 +144,9 @@ function priceType(row: CataloguePresentationInput) {
   const facet = textFacet(row.facets, 'price_type')?.toLowerCase()
   if (facet) return facet
   const source = compact(row.source_column_label).toLowerCase()
+  if (/\b(?:rate|price)\s*per\s*coils?\b/.test(source)) return 'coil_price'
+  if (/\b(?:rate|price)\s*per\s*rolls?\b/.test(source)) return 'roll_price'
+  if (/\b(?:rate|price)\s*per\s*(?:mtr|meter|metre)s?\b/.test(source)) return 'meter_price'
   if (/maximum retail price|\bmrp\b/.test(source)) return 'mrp'
   if (/unit sale price|price per (?:number|piece|unit)/.test(source)) return 'unit_sale_price'
   if (/\bnet price\b|\bnet rate\b/.test(source)) return 'net_price'
@@ -151,12 +156,26 @@ function priceType(row: CataloguePresentationInput) {
 
 function priceTypeLabel(row: CataloguePresentationInput) {
   const type = priceType(row)
+  if (type === 'coil_price') return 'Coil price'
+  if (type === 'roll_price') return 'Roll price'
+  if (type === 'meter_price') return 'Per-metre price'
   if (type === 'unit_sale_price') return 'Unit price'
   if (type === 'mrp') return row.basis_quantity && row.basis_quantity > 1 ? 'Pack MRP' : 'MRP'
   if (type === 'net_price') return 'Net price'
   if (type === 'list_price') return 'List price'
   if (type === 'line_total') return 'Line total'
   return 'Quoted price'
+}
+
+export function catalogueBasisLabel(row: Pick<CataloguePresentationInput, 'basis_quantity' | 'basis_unit' | 'package_type'>) {
+  const quantity = Number(row.basis_quantity)
+  const unit = compact(row.basis_unit).toLowerCase()
+  const packageType = compact(row.package_type).toLowerCase()
+  if (!Number.isFinite(quantity) || quantity <= 0 || !unit) return 'Basis unresolved'
+  if (unit === 'meter' && quantity === 1) return 'per metre'
+  if (unit === 'meter' && ['coil', 'roll'].includes(packageType)) return `per ${formatNumber(quantity)} m ${packageType}`
+  if (quantity === 1) return `per ${unit}`
+  return `per ${formatNumber(quantity)} ${unit}s`
 }
 
 function alignedSourceCells(row: CataloguePresentationInput) {

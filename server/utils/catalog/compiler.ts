@@ -379,7 +379,11 @@ export function analyzeSourceTableDeterministically(options: Omit<CompileTableOp
           variant.sku ?? '',
           productVariants.length ? '' : columnLabel
         ]).join(' ')
-        const variantRowLabel = uniqueStrings([variant.label, rowLabel]).join(' ')
+        const rawVariantRowLabel = uniqueStrings([variant.label, rowLabel]).join(' ')
+        const sku = variant.sku
+          ?? inferAlignedSkuFromAdjacentRow(grid, rowIndex, colIndex, localIdentity)
+          ?? inferSkuFromRow(semanticRow, colIndex, rawVariantRowLabel, variantColumnLabel, columnHeaders)
+        const variantRowLabel = isUnavailableIdentity(rawVariantRowLabel) && sku ? sku : rawVariantRowLabel
         const variantContext = [options.documentName, options.table.title, section, variantRowLabel, variantColumnLabel].filter(Boolean).join(' ')
         const category = inferCategory(variantContext, variantRowLabel)
         const facetContext = [options.table.title, section, variantRowLabel, variantColumnLabel].filter(Boolean).join(' ')
@@ -400,17 +404,15 @@ export function analyzeSourceTableDeterministically(options: Omit<CompileTableOp
         const columnHasExplicitBasis = /(?:\bper\s*(?:meters?|metres?|mtrs?|coil|roll|piece|pc|unit|number)|\brate\s*(?:per\s*)?(?:meters?|metres?|mtrs?|coil|roll|piece|pc|unit|number)|\d+(?:\.\d+)?\s*(?:meters?|metres?|mtrs?)\b)/.test(normalized(variantColumnLabel))
         let basis = columnHasExplicitBasis && columnBasis.quantity && columnBasis.unit
           ? columnBasis
-          : inferBasis([activeBasisContext, section, options.table.title, semanticRow.join(' ')].filter(Boolean).join(' '), category)
+          : inferBasis([variantColumnLabel, columnLabel, activeBasisContext, section, options.table.title, semanticRow.join(' ')].filter(Boolean).join(' '), category)
         if (structuralPrice && (!basis.quantity || !basis.unit)) {
           basis = { quantity: 1, unit: 'piece', packageType: null, inferred: true }
         }
+        basis = inferPackagedLengthBasis(semanticRow, columnHeaders, variantColumnLabel, basis)
         basis = inferExtendedPriceBasis(row, colIndex, variantColumnLabel, amount, basis)
         basis = inferTransposedPriceBasis(grid, rowIndex, colIndex, amount, basis)
         basis = inferQuoteLineTotalBasis(row, colIndex, columnHeaders, variantColumnLabel, amount, basis)
         if (basis.inferred) facets.price_basis_inferred = true
-        const sku = variant.sku
-          ?? inferAlignedSkuFromAdjacentRow(grid, rowIndex, colIndex, localIdentity)
-          ?? inferSkuFromRow(semanticRow, colIndex, variantRowLabel, variantColumnLabel, columnHeaders)
         const canonicalName = canonicalNameFor({ category, context: variantContext, rowLabel: variantRowLabel, columnLabel: variantColumnLabel, facets, sku })
         const base = {
           category,
@@ -882,6 +884,10 @@ function normalized(value: string | null | undefined) {
     .trim()
 }
 
+function isUnavailableIdentity(value: string | null | undefined) {
+  return /^(?:n\s*\.?\s*a\.?|not\s+available|[-–—]+)$/i.test(String(value ?? '').trim())
+}
+
 function isSectionRow(row: string[]) {
   const nonEmpty = row.filter(Boolean)
   const unique = uniqueStrings(nonEmpty)
@@ -1148,6 +1154,7 @@ function inferCategory(value: string, rowLabel = ''): CatalogCategory {
   if (/\brj\s*(?:11|45)\b/.test(identity) && !/\b(?:cable|utp|stp)\b/.test(identity)) return 'socket'
   if (/\brg[ -]?(?:6|11|59)\b|co axial|coaxial/.test(identity)) return 'coaxial_cable'
   if (/\bcctv\b/.test(identity) && /cable|communication|packing|rg[ -]?59/.test(text)) return 'coaxial_cable'
+  if (/\bbuilding management system cable\b|\bbms cable\b/.test(identity)) return 'data_cable'
   if (/\bcat[ -]?(?:5e|6|6a|7)\b|\butp\b|\bstp\b|lan cable/.test(identity)) return 'data_cable'
   if (/telephone|jelly filled|\bpair\b/.test(identity) && /cable|wire|pair/.test(identity)) return 'telephone_cable'
   if (/\bprcb\s*\d+/i.test(identity)) return 'junction_box'
@@ -1163,7 +1170,9 @@ function inferCategory(value: string, rowLabel = ''): CatalogCategory {
   if (/\b(?:conduits?|pipes?|fittings?|elbows?|bends?|couplers?|couplings?|socket fitting|tees?|reducers?|saddles?|trunking|internal angle|external angle|unions?|end caps?|strainer|floor trap|[ps]\s+trap|nahani trap|air admittance valve|ball valve|vent cowel|sovent|compensator|single y|double y|door y|red cross|red y)\b/.test(text)
     || /\b(?:pvc|cpvc|upvc|ppr)\s+(?:pipes?\s*(?:&|and)\s*)?fittings?\b/.test(text)
     || /\bsockett?edpipe\b/.test(text)) return 'conduit'
-  if (/flexible|\bflx\b/.test(text) && /cable|wire/.test(text)) return 'flexible_cable'
+  if (/\bspeaker wire\b/.test(identity)) return 'flexible_cable'
+  if (/flexible|\bflx\b/.test(text)
+    && (/cable|wire/.test(text) || (/\bsqmm\b/.test(row) && /\b\d+(?:\.\d+)?\s*core\b/.test(text)))) return 'flexible_cable'
   if (/submersible/.test(text) && /cable/.test(text)) return 'flexible_cable'
   if (/multi\s*core/.test(text) && /(?:frls|pvc insulated)/.test(text) && /copper/.test(text) && /(?:round sheathed|industrial cable)/.test(text)) return 'flexible_cable'
   if (/armoured|xlpe|power cable|\b[ax]?2x[wyf]+\b/.test(text) && /cable/.test(text)) return 'power_cable'
@@ -1325,7 +1334,7 @@ function inferBasis(value: string, category: CatalogCategory) {
     return { quantity: 1, unit: 'piece', packageType: null, inferred: false }
   }
   if (category === 'conduit') return { quantity: 1, unit: 'piece', packageType: null, inferred: false }
-  if (/\b(?:per unit|per piece|per pc|per number|ratepc|unit mrp|mrp per unit|price per unit)\b/.test(text)) {
+  if (/\b(?:per unit|per piece|per pc|per number|ratepc|unit mrp|mrp per unit|price per unit)\b|\bmrp\s*\/\s*unit(?:in)?\b/.test(text)) {
     return { quantity: 1, unit: 'piece', packageType: null, inferred: false }
   }
   if (category === 'other' && /\b(?:rate|price|mrp|cost)\b/.test(text)) {
@@ -1347,6 +1356,33 @@ function inferExtendedPriceBasis(
   if (!pack || !unitPrice || !Number.isInteger(pack) || pack > 1000) return fallback
   if (Math.abs((pack * unitPrice) - amount) > 0.01) return fallback
   return { quantity: pack, unit: 'piece', packageType: null, inferred: false }
+}
+
+function inferPackagedLengthBasis(
+  row: string[],
+  columnHeaders: string[],
+  columnLabel: string,
+  fallback: ReturnType<typeof inferBasis>
+) {
+  const label = normalized(columnLabel)
+  const packageType = /\bper\s*coils?\b/.test(label)
+    ? 'coil'
+    : /\bper\s*rolls?\b/.test(label)
+      ? 'roll'
+      : null
+  if (!packageType) return fallback
+
+  const packingIndex = columnHeaders.findIndex(header => {
+    const text = normalized(header)
+    return /\b(?:std|standard)\b.*\b(?:coil|roll)?\s*pack(?:ing)?\b|\b(?:coil|roll)\s*pack(?:ing)?\b/.test(text)
+  })
+  if (packingIndex < 0) return fallback
+  const packing = normalized(row[packingIndex])
+  const length = packing.match(/^(\d+(?:\.\d+)?)\s*(?:meters?|metres?|mtrs?|mtr)\b/)
+  if (!length?.[1]) return fallback
+  const quantity = Number(length[1])
+  if (!Number.isFinite(quantity) || quantity <= 0) return fallback
+  return { quantity, unit: 'meter', packageType, inferred: false }
 }
 
 function priceBasisContextFromRow(row: string[]) {

@@ -107,8 +107,7 @@ function formatCurrency(amount: number) {
 }
 
 function basisLabel(row: CatalogueRow) {
-  if (!row.basis_quantity || !row.basis_unit) return 'Basis unresolved'
-  return `per ${row.basis_quantity} ${row.basis_unit}${row.basis_quantity === 1 ? '' : 's'}`
+  return catalogueBasisLabel(row)
 }
 
 const presentationCache = new WeakMap<CatalogueRow, ReturnType<typeof cataloguePresentation>>()

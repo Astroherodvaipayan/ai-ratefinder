@@ -93,6 +93,7 @@ async function getMetadata(
       .select('category, validation_errors')
       .eq('release_id', releaseId)
       .eq('status', status)
+      .order('id')
       .range(from, from + DATABASE_PAGE_SIZE - 1)
 
     if (error) throw createError({ statusCode: 500, statusMessage: error.message })

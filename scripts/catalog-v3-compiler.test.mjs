@@ -9,6 +9,8 @@ const {
   strictMoney
 } = await jiti.import('../server/utils/catalog/compiler.ts')
 const { extractSourceTables, findRepeatedSourceBlocks, findTruncatedSourceRows, splitEmbeddedSourceTables } = await jiti.import('../server/utils/catalog/sourceTables.ts')
+const { validateCompiledOffer } = await jiti.import('../server/utils/catalog/contracts.ts')
+const { auditCatalogueOfferSemantics } = await jiti.import('../server/utils/catalog/quality.ts')
 
 function compile(grid, documentName = 'Vendor Price List.pdf', tableIndex = 0, title = null) {
   return analyzeSourceTableDeterministically({
@@ -438,6 +440,79 @@ test('KEI single-core coil table rejects amperage and coil-count columns', () =>
   assert.ok(result.audit.decisions.filter(decision => [0, 2, 4].includes(decision.source_col_index)).every(decision => !decision.selected))
   assert.ok(result.offers.every(offer => typeof offer.facets.size_sqmm === 'number'))
   assert.ok(result.offers.every(offer => !offer.facets.current_range))
+  assert.deepEqual(
+    result.offers.filter(offer => offer.source_row_index === 2).map(offer => ({
+      amount: offer.amount,
+      quantity: offer.basis_quantity,
+      unit: offer.basis_unit,
+      package: offer.package_type
+    })),
+    [
+      { amount: 5900, quantity: 300, unit: 'meter', package: 'coil' },
+      { amount: 19.67, quantity: 1, unit: 'meter', package: null },
+      { amount: 6140, quantity: 300, unit: 'meter', package: 'coil' },
+      { amount: 20.47, quantity: 1, unit: 'meter', package: null }
+    ]
+  )
+  assert.deepEqual(auditCatalogueOfferSemantics(result.offers), [])
+})
+
+test('rejects a per-metre source column that inherited the 300 m coil basis', () => {
+  const stale = {
+    category: 'single_core_wire', canonical_name: 'KEI Homecab 0.5 sq mm', brand: 'KEI', sku: null,
+    aliases: [], facets: {}, amount: 19.67, currency: 'INR', basis_quantity: 300, basis_unit: 'meter',
+    package_type: 'coil', moq: null, source_page: 1, source_table_index: 0, source_row_index: 2,
+    source_col_index: 6, source_table_title: 'Industrial wire', source_row_label: '0.50 16/0.20',
+    source_column_label: 'HOMECAB (FR) RATE PER MTR.', raw_price_value: '19.67', source_excerpt: 'row 2'
+  }
+  assert.ok(validateCompiledOffer(stale).includes('source_price_basis_mismatch'))
+})
+
+test('rejects coil and metre prices whose arithmetic does not match the pack length', () => {
+  const shared = {
+    category: 'single_core_wire', canonical_name: 'KEI Homecab 0.5 sq mm', facets: {}, source_table_index: 0,
+    source_row_index: 2
+  }
+  const failures = auditCatalogueOfferSemantics([
+    { ...shared, amount: 5900, basis_quantity: 300, basis_unit: 'meter', package_type: 'coil', source_col_index: 5, source_column_label: 'HOMECAB RATE PER COIL' },
+    { ...shared, amount: 25, basis_quantity: 1, basis_unit: 'meter', package_type: null, source_col_index: 6, source_column_label: 'HOMECAB RATE PER MTR.' }
+  ])
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].reason, 'inconsistent_pack_unit_price')
+})
+
+test('treats OCR-joined MRP/Unitin columns as per-piece prices', () => {
+  const result = compile([
+    ['Description', 'Three Pole MRP/Unitin ₹', 'Four Pole MRP/Unitin ₹'],
+    ['EM90983OOCo', '2520', '3390']
+  ], 'Retail Product Pricelist.pdf')
+  assert.equal(result.offers.length, 2)
+  assert.ok(result.offers.every(offer => offer.basis_quantity === 1 && offer.basis_unit === 'piece'))
+  assert.ok(result.offers.every(offer => offer.validation_errors.length === 0))
+})
+
+test('classifies BMS and header-only flexible cable matrices as cable products', () => {
+  const bms = compile([
+    ['POLYCAB BUILDING MANAGEMENT SYSTEM CABLE (BMS)', '0.5 sq.mm (16/.2)'],
+    ['2 Core', '9260']
+  ], 'Polycab Price List.pdf', 0, 'POLYCAB BUILDING MANAGEMENT SYSTEM CABLE (BMS) | RATE PER 100 METERS')
+  assert.ok(bms.offers.every(offer => offer.category === 'data_cable'))
+
+  const flexible = compile([
+    ['Size Sq.mm', '2 Core', '3 Core'],
+    ['0.50 SQ.MM', '9710', '12153']
+  ], 'RR FLEXIBLE List.pdf', 0, 'RATE PER 100 METERS')
+  assert.ok(flexible.offers.every(offer => offer.category === 'flexible_cable'))
+})
+
+test('uses an aligned RG or CAT SKU when a neighboring pack option is NA', () => {
+  const coax = compile([
+    ['SIZE', '90 Mtr. Packing', '100 Mtr. Packing', '305 Mtr. Packing'],
+    ['RG-59', 'NA', '3490', '10640']
+  ], 'KEI WIRE PRICE LIST.pdf', 0, 'KEI INDUSTRIAL JELLY FILLED CO AXIAL CABLES')
+  assert.ok(coax.offers.every(offer => offer.category === 'coaxial_cable'))
+  assert.ok(coax.offers.every(offer => offer.source_row_label === 'RG-59'))
+  assert.ok(coax.offers.every(offer => !offer.canonical_name.startsWith('NA')))
 })
 
 test('document and price-list reference numbers never become product current ranges', () => {
@@ -735,7 +810,7 @@ test('keeps a normal catalogue header instead of treating it as a product sectio
   assert.deepEqual(result.offers.map(offer => offer.amount), [1435, 336, 160])
   assert.deepEqual(result.offers.map(offer => offer.sku), ['6380 38', '6380 08', '6380 36'])
   assert.deepEqual(result.offers.map(offer => [offer.basis_quantity, offer.basis_unit]), [
-    [1, 'meter'], [1, 'meter'], [1, 'unit']
+    [1, 'meter'], [1, 'meter'], [1, 'piece']
   ])
 })
 
